@@ -2246,16 +2246,25 @@ smb2_lseek(struct smb2_context *smb2, struct smb2fh *fh,
 struct create_cb_data {
         smb2_command_cb cb;
         void *cb_data;
+        uint32_t status;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure. Every callback drops one reference on every exit
+         * path; the drop that reaches zero completes the command, so the
+         * user callback runs and the structure is freed exactly once no
+         * matter in which order the library fires the members (reply
+         * order, PDU timeout or context teardown).
+         */
+        int pending;
 };
 
 static void
-create_cb_2(struct smb2_context *smb2, int status,
-            void *command_data, void *private_data)
+create_complete(struct smb2_context *smb2, struct create_cb_data *create_data)
 {
-        struct create_cb_data *create_data = private_data;
+        int status = 0;
 
-        if (status != SMB2_STATUS_SUCCESS) {
-                status = -nterror_to_errno(status);
+        if (create_data->status != SMB2_STATUS_SUCCESS) {
+                status = -nterror_to_errno(create_data->status);
         }
 
         create_data->cb(smb2, status, NULL, create_data->cb_data);
@@ -2263,13 +2272,38 @@ create_cb_2(struct smb2_context *smb2, int status,
 }
 
 static void
+create_unref(struct smb2_context *smb2, struct create_cb_data *create_data)
+{
+        if (--create_data->pending == 0) {
+                create_complete(smb2, create_data);
+        }
+}
+
+static void
+create_cb_2(struct smb2_context *smb2, int status,
+            void *command_data, void *private_data)
+{
+        struct create_cb_data *create_data = private_data;
+
+        if (create_data->status == SMB2_STATUS_SUCCESS) {
+                create_data->status = status;
+        }
+        create_unref(smb2, create_data);
+}
+
+static void
 create_cb_1(struct smb2_context *smb2, int status,
             void *command_data, void *private_data)
 {
+        struct create_cb_data *create_data = private_data;
+
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_error(smb2, "Create failed with status %s.", nterror_to_str(status));
-                return;
         }
+        if (create_data->status == SMB2_STATUS_SUCCESS) {
+                create_data->status = status;
+        }
+        create_unref(smb2, create_data);
 }
 
 static int
@@ -2337,6 +2371,7 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        create_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -2407,6 +2442,7 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        create_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -2426,7 +2462,38 @@ struct stat_cb_data {
          * here until we build the stat structure.
          */
         uint32_t reparse_tag;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure. Every callback drops one reference on every exit
+         * path; the drop that reaches zero completes the command, so the
+         * user callback runs and the structure is freed exactly once no
+         * matter in which order the library fires the members (reply
+         * order, PDU timeout or context teardown).
+         */
+        int pending;
 };
+
+static void
+stat_complete(struct smb2_context *smb2, struct stat_cb_data *stat_data)
+{
+        if (stat_data->status != SMB2_STATUS_SUCCESS) {
+                smb2_set_nterror(smb2, stat_data->status, "Query info failed with "
+                                 "(0x%08x) %s", stat_data->status,
+                                 nterror_to_str(stat_data->status));
+        }
+
+        stat_data->cb(smb2, -nterror_to_errno(stat_data->status),
+                      stat_data->st, stat_data->cb_data);
+        free(stat_data);
+}
+
+static void
+stat_unref(struct smb2_context *smb2, struct stat_cb_data *stat_data)
+{
+        if (--stat_data->pending == 0) {
+                stat_complete(smb2, stat_data);
+        }
+}
 
 /*
  * FILE_ALL_INFORMATION does not contain the reparse tag, so stat and
@@ -2448,15 +2515,14 @@ stat_attribute_tag_cb(struct smb2_context *smb2, int status,
          * in which case we just report the reparse point as a link the
          * way we always used to.
          */
-        if (status != SMB2_STATUS_SUCCESS || rep == NULL) {
-                return;
+        if (status == SMB2_STATUS_SUCCESS && rep != NULL) {
+                tag = rep->output_buffer;
+                if (tag) {
+                        stat_data->reparse_tag = tag->reparse_tag;
+                        smb2_free_data(smb2, tag);
+                }
         }
-
-        tag = rep->output_buffer;
-        if (tag) {
-                stat_data->reparse_tag = tag->reparse_tag;
-                smb2_free_data(smb2, tag);
-        }
+        stat_unref(smb2, stat_data);
 }
 
 static void
@@ -2468,20 +2534,22 @@ fstat_cb_1(struct smb2_context *smb2, int status,
         struct smb2_file_all_info *fs;
         struct smb2_stat_64 *st = stat_data->st;
 
-        if (status != SMB2_STATUS_SUCCESS) {
-                smb2_set_nterror(smb2, status, "Query info failed with "
-                                 "(0x%08x) %s", status, nterror_to_str(status));
-                stat_data->cb(smb2, -nterror_to_errno(status),
-                       NULL, stat_data->cb_data);
-                free(stat_data);
+        if (stat_data->status == SMB2_STATUS_SUCCESS) {
+                stat_data->status = status;
+        }
+        if (stat_data->status != SMB2_STATUS_SUCCESS) {
+                smb2_set_nterror(smb2, stat_data->status, "Query info failed with "
+                                 "(0x%08x) %s", stat_data->status,
+                                 nterror_to_str(stat_data->status));
+                stat_unref(smb2, stat_data);
                 return;
         }
         fs = rep->output_buffer;
         /* A server can claim success and still send no output buffer */
         if (fs == NULL) {
                 smb2_set_error(smb2, "Query info reply has no data");
-                stat_data->cb(smb2, -EIO, NULL, stat_data->cb_data);
-                free(stat_data);
+                stat_data->status = SMB2_STATUS_DATA_ERROR;
+                stat_unref(smb2, stat_data);
                 return;
         }
 
@@ -2505,8 +2573,7 @@ fstat_cb_1(struct smb2_context *smb2, int status,
 
         smb2_free_data(smb2, fs);
 
-        stat_data->cb(smb2, 0, st, stat_data->cb_data);
-        free(stat_data);
+        stat_unref(smb2, stat_data);
 }
 
 int
@@ -2569,6 +2636,8 @@ smb2_fstat_async(struct smb2_context *smb2, struct smb2fh *fh,
         }
         smb2_add_unrelated_compound_pdu(smb2, pdu, next_pdu);
 
+        /* attribute tag query + info query */
+        stat_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -2583,15 +2652,7 @@ getinfo_cb_3(struct smb2_context *smb2, int status,
         if (stat_data->status == SMB2_STATUS_SUCCESS) {
                 stat_data->status = status;
         }
-        if (stat_data->status != SMB2_STATUS_SUCCESS) {
-                smb2_set_nterror(smb2, stat_data->status, "Query info failed with "
-                                 "(0x%08x) %s", stat_data->status,
-                                 nterror_to_str(stat_data->status));
-        }
-
-        stat_data->cb(smb2, -nterror_to_errno(stat_data->status),
-                      stat_data->st, stat_data->cb_data);
-        free(stat_data);
+        stat_unref(smb2, stat_data);
 }
 
 static void
@@ -2605,11 +2666,13 @@ getinfo_cb_2(struct smb2_context *smb2, int status,
                 stat_data->status = status;
         }
         if (stat_data->status != SMB2_STATUS_SUCCESS) {
+                stat_unref(smb2, stat_data);
                 return;
         }
         /* A server can claim success and still send no output buffer */
         if (rep->output_buffer == NULL) {
                 stat_data->status = SMB2_STATUS_DATA_ERROR;
+                stat_unref(smb2, stat_data);
                 return;
         }
 
@@ -2649,6 +2712,7 @@ getinfo_cb_2(struct smb2_context *smb2, int status,
                         vfs->caller_available_allocation_units;
         }
         smb2_free_data(smb2, rep->output_buffer);
+        stat_unref(smb2, stat_data);
 }
 
 static void
@@ -2660,6 +2724,7 @@ getinfo_cb_1(struct smb2_context *smb2, int status,
         if (stat_data->status == SMB2_STATUS_SUCCESS) {
                 stat_data->status = status;
         }
+        stat_unref(smb2, stat_data);
 }
 
 static int
@@ -2764,6 +2829,10 @@ smb2_getinfo_async(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        /* create + [attribute tag query] + info query + close */
+        stat_data->pending =
+                (info_type == SMB2_0_INFO_FILE &&
+                 file_info_class == SMB2_FILE_ALL_INFORMATION) ? 4 : 3;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -2797,17 +2866,16 @@ struct trunc_cb_data {
 
         uint32_t status;
         uint64_t length;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure; see create_cb_data.pending for the discipline.
+         */
+        int pending;
 };
 
 static void
-trunc_cb_3(struct smb2_context *smb2, int status,
-           void *command_data _U_, void *private_data)
+trunc_complete(struct smb2_context *smb2, struct trunc_cb_data *trunc_data)
 {
-        struct trunc_cb_data *trunc_data = private_data;
-
-        if (trunc_data->status == SMB2_STATUS_SUCCESS) {
-                trunc_data->status = status;
-        }
         if (trunc_data->status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, trunc_data->status, "Truncate failed with "
                                  "(0x%08x) %s", trunc_data->status,
@@ -2820,6 +2888,26 @@ trunc_cb_3(struct smb2_context *smb2, int status,
 }
 
 static void
+trunc_unref(struct smb2_context *smb2, struct trunc_cb_data *trunc_data)
+{
+        if (--trunc_data->pending == 0) {
+                trunc_complete(smb2, trunc_data);
+        }
+}
+
+static void
+trunc_cb_3(struct smb2_context *smb2, int status,
+           void *command_data _U_, void *private_data)
+{
+        struct trunc_cb_data *trunc_data = private_data;
+
+        if (trunc_data->status == SMB2_STATUS_SUCCESS) {
+                trunc_data->status = status;
+        }
+        trunc_unref(smb2, trunc_data);
+}
+
+static void
 trunc_cb_2(struct smb2_context *smb2, int status,
            void *command_data, void *private_data)
 {
@@ -2828,6 +2916,7 @@ trunc_cb_2(struct smb2_context *smb2, int status,
         if (trunc_data->status == SMB2_STATUS_SUCCESS) {
                 trunc_data->status = status;
         }
+        trunc_unref(smb2, trunc_data);
 }
 
 static void
@@ -2839,6 +2928,7 @@ trunc_cb_1(struct smb2_context *smb2, int status,
         if (trunc_data->status == SMB2_STATUS_SUCCESS) {
                 trunc_data->status = status;
         }
+        trunc_unref(smb2, trunc_data);
 }
 
 int
@@ -2919,6 +3009,8 @@ smb2_truncate_async(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        /* create + set info + close */
+        trunc_data->pending = 3;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -2930,6 +3022,11 @@ struct new_name_cb_data {
         smb2_command_cb cb;
         void *cb_data;
         uint32_t status;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure; see create_cb_data.pending for the discipline.
+         */
+        int pending;
 };
 
 static void free_new_name_data(struct new_name_cb_data *new_name_data)
@@ -2939,14 +3036,9 @@ static void free_new_name_data(struct new_name_cb_data *new_name_data)
 }
 
 static void
-new_name_cb_3(struct smb2_context *smb2, int status,
-           void *command_data _U_, void *private_data)
+new_name_complete(struct smb2_context *smb2,
+                  struct new_name_cb_data *new_name_data)
 {
-        struct new_name_cb_data *new_name_data = private_data;
-
-        if (new_name_data->status == SMB2_STATUS_SUCCESS) {
-                new_name_data->status = status;
-        }
         if (new_name_data->status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, new_name_data->status, "Rename failed with "
                                  "(0x%08x) %s", new_name_data->status,
@@ -2959,6 +3051,27 @@ new_name_cb_3(struct smb2_context *smb2, int status,
 }
 
 static void
+new_name_unref(struct smb2_context *smb2,
+               struct new_name_cb_data *new_name_data)
+{
+        if (--new_name_data->pending == 0) {
+                new_name_complete(smb2, new_name_data);
+        }
+}
+
+static void
+new_name_cb_3(struct smb2_context *smb2, int status,
+           void *command_data _U_, void *private_data)
+{
+        struct new_name_cb_data *new_name_data = private_data;
+
+        if (new_name_data->status == SMB2_STATUS_SUCCESS) {
+                new_name_data->status = status;
+        }
+        new_name_unref(smb2, new_name_data);
+}
+
+static void
 new_name_cb_2(struct smb2_context *smb2, int status,
            void *command_data _U_, void *private_data)
 {
@@ -2967,6 +3080,7 @@ new_name_cb_2(struct smb2_context *smb2, int status,
         if (new_name_data->status == SMB2_STATUS_SUCCESS) {
                 new_name_data->status = status;
         }
+        new_name_unref(smb2, new_name_data);
 }
 
 static void
@@ -2978,6 +3092,7 @@ new_name_cb_1(struct smb2_context *smb2, int status,
         if (new_name_data->status == SMB2_STATUS_SUCCESS) {
                 new_name_data->status = status;
         }
+        new_name_unref(smb2, new_name_data);
 }
 
 static int
@@ -3078,6 +3193,8 @@ smb2_new_name_async(struct smb2_context *smb2, const char *oldpath,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        /* create + set info + close */
+        new_name_data->pending = 3;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -3186,7 +3303,16 @@ struct symlink_cb_data {
         int is_dir;
         char *linkpath;
         char *error;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure; see create_cb_data.pending for the discipline. The
+         * failure-path cleanup unlink holds one reference too.
+         */
+        int pending;
 };
+
+static void symlink_cleanup_cb(struct smb2_context *smb2, int status,
+                               void *command_data, void *private_data);
 
 static void
 free_symlink_data(struct symlink_cb_data *cb_data)
@@ -3211,12 +3337,44 @@ symlink_finish(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
 }
 
 static void
+symlink_complete(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
+{
+        if (cb_data->status != SMB2_STATUS_SUCCESS && cb_data->created) {
+                /*
+                 * We created the placeholder but never got to turn it into
+                 * a symlink. Do not leave an empty file or directory
+                 * behind. Transfer our reference to the cleanup unlink;
+                 * its completion callback drops it again.
+                 */
+                cb_data->error = strdup(smb2_get_error(smb2));
+                cb_data->created = 0;
+                cb_data->pending = 1;
+                if (smb2_unlink_internal(smb2, cb_data->linkpath,
+                                         cb_data->is_dir,
+                                         symlink_cleanup_cb, cb_data) == 0) {
+                        return;
+                }
+                cb_data->pending = 0;
+        }
+
+        symlink_finish(smb2, cb_data);
+}
+
+static void
+symlink_unref(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
+{
+        if (--cb_data->pending == 0) {
+                symlink_complete(smb2, cb_data);
+        }
+}
+
+static void
 symlink_cleanup_cb(struct smb2_context *smb2, int status _U_,
                    void *command_data _U_, void *private_data)
 {
         /* Whether or not we managed to remove the placeholder again, the
          * error we report is the one that made the symlink fail. */
-        symlink_finish(smb2, private_data);
+        symlink_unref(smb2, private_data);
 }
 
 static void
@@ -3230,7 +3388,10 @@ symlink_cb_1(struct smb2_context *smb2, int status,
         } else {
                 cb_data->created = 1;
         }
-        cb_data->status = status;
+        if (cb_data->status == SMB2_STATUS_SUCCESS) {
+                cb_data->status = status;
+        }
+        symlink_unref(smb2, cb_data);
 }
 
 static void
@@ -3247,6 +3408,7 @@ symlink_cb_2(struct smb2_context *smb2, int status,
         if (cb_data->status == SMB2_STATUS_SUCCESS) {
                 cb_data->status = status;
         }
+        symlink_unref(smb2, cb_data);
 }
 
 static void
@@ -3258,22 +3420,7 @@ symlink_cb_3(struct smb2_context *smb2, int status,
         if (cb_data->status == SMB2_STATUS_SUCCESS) {
                 cb_data->status = status;
         }
-
-        if (cb_data->status != SMB2_STATUS_SUCCESS && cb_data->created) {
-                /*
-                 * We created the placeholder but never got to turn it into
-                 * a symlink. Do not leave an empty file or directory
-                 * behind.
-                 */
-                cb_data->error = strdup(smb2_get_error(smb2));
-                if (smb2_unlink_internal(smb2, cb_data->linkpath,
-                                         cb_data->is_dir,
-                                         symlink_cleanup_cb, cb_data) == 0) {
-                        return;
-                }
-        }
-
-        symlink_finish(smb2, cb_data);
+        symlink_unref(smb2, cb_data);
 }
 
 /*
@@ -3465,6 +3612,8 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        /* create + ioctl + close */
+        symlink_data->pending = 3;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
@@ -3476,6 +3625,11 @@ struct readlink_cb_data {
 
         uint32_t status;
         struct smb2_reparse_data_buffer *reparse;
+        /*
+         * Number of compound PDUs that still hold a pointer to this
+         * structure; see create_cb_data.pending for the discipline.
+         */
+        int pending;
 };
 
 /*
@@ -3492,10 +3646,8 @@ readlink_strip_nt_prefix(char *name)
 }
 
 static void
-readlink_cb_3(struct smb2_context *smb2, int status,
-            void *command_data _U_, void *private_data)
+readlink_complete(struct smb2_context *smb2, struct readlink_cb_data *cb_data)
 {
-        struct readlink_cb_data *cb_data = private_data;
         struct smb2_reparse_data_buffer *rp = cb_data->reparse;
         char *target = NULL;
         int rc;
@@ -3544,6 +3696,26 @@ readlink_cb_3(struct smb2_context *smb2, int status,
 }
 
 static void
+readlink_unref(struct smb2_context *smb2, struct readlink_cb_data *cb_data)
+{
+        if (--cb_data->pending == 0) {
+                readlink_complete(smb2, cb_data);
+        }
+}
+
+static void
+readlink_cb_3(struct smb2_context *smb2, int status,
+            void *command_data _U_, void *private_data)
+{
+        struct readlink_cb_data *cb_data = private_data;
+
+        if (cb_data->status == SMB2_STATUS_SUCCESS) {
+                cb_data->status = status;
+        }
+        readlink_unref(smb2, cb_data);
+}
+
+static void
 readlink_cb_2(struct smb2_context *smb2, int status,
             void *command_data, void *private_data)
 {
@@ -3559,6 +3731,7 @@ readlink_cb_2(struct smb2_context *smb2, int status,
         if (status == SMB2_STATUS_SUCCESS) {
                 cb_data->reparse = rep->output;
         }
+        readlink_unref(smb2, cb_data);
 }
 
 static void
@@ -3570,7 +3743,10 @@ readlink_cb_1(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
         }
-        cb_data->status = status;
+        if (cb_data->status == SMB2_STATUS_SUCCESS) {
+                cb_data->status = status;
+        }
+        readlink_unref(smb2, cb_data);
 }
 
 int
@@ -3646,6 +3822,8 @@ smb2_readlink_async(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        /* create + ioctl + close */
+        readlink_data->pending = 3;
         smb2_queue_pdu(smb2, pdu);
 
         return 0;
