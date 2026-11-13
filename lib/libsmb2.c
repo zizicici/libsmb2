@@ -2355,6 +2355,7 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         pdu = smb2_cmd_create_async(smb2, &cr_req, create_cb_1, create_data);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create create command");
+                free(create_data);
                 return -ENOMEM;
         }
 
@@ -2426,6 +2427,7 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         pdu = smb2_cmd_create_async(smb2, &cr_req, create_cb_1, create_data);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create create command");
+                free(create_data);
                 return -ENOMEM;
         }
 
@@ -3277,6 +3279,7 @@ smb2_ftruncate_async(struct smb2_context *smb2, struct smb2fh *fh,
         pdu = smb2_cmd_set_info_async(smb2, &req, ftrunc_cb_1, create_data);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create set info command");
+                free(create_data);
                 return -ENOMEM;
         }
         smb2_queue_pdu(smb2, pdu);

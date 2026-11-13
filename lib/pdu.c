@@ -764,6 +764,21 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 
         if (smb3_encrypt_pdu(smb2, pdu) < 0) {
+                struct smb2_pdu *p;
+
+                /*
+                 * The whole chain is about to be freed without ever being
+                 * sent. Fire every member's callback first, the way
+                 * smb2_destroy_context() does, so shared compound callback
+                 * state sees each holder go away — otherwise the state never
+                 * completes and the user callback is lost.
+                 */
+                for (p = pdu; p; p = p->next_compound) {
+                        if (p->cb) {
+                                p->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                      NULL, p->cb_data);
+                        }
+                }
                 smb2_free_pdu(smb2, pdu);
                 smb2_close_context(smb2);
                 return;
