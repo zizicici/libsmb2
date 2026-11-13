@@ -779,7 +779,9 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                                       NULL, p->cb_data);
                         }
                 }
-                smb2_free_pdu(smb2, pdu);
+                if (!pdu->caller_frees_pdu) {
+                        smb2_free_pdu(smb2, pdu);
+                }
                 smb2_close_context(smb2);
                 return;
         }

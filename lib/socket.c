@@ -1470,6 +1470,32 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                 goto out;
         }
         if (revents & POLLHUP) {
+                /*
+                 * macOS reports a refused non-blocking connect as POLLHUP
+                 * without POLLERR/POLLOUT. Complete a pending connect with
+                 * the real socket error, the way the POLLERR branch does,
+                 * instead of leaving it for context teardown (which can only
+                 * report a generic cancellation).
+                 */
+                if (smb2->connect_cb) {
+                        int err = 0;
+                        socklen_t err_size = sizeof(err);
+
+                        if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                                       (char *)&err, &err_size) != 0 && err == 0) {
+                                err = errno;
+                        }
+                        if (err != 0) {
+                                smb2_set_error(smb2, "smb2_service: socket error "
+                                                "%s(%d).",
+                                                strerror(err), err);
+                                smb2->connect_cb(smb2, err, NULL,
+                                                 smb2->connect_data);
+                                smb2->connect_cb = NULL;
+                                ret = -1;
+                                goto out;
+                        }
+                }
                 smb2_set_error(smb2, "smb2_service: POLLHUP, "
                                 "socket error.");
                 ret = -1;
