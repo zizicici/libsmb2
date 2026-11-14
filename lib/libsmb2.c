@@ -2082,7 +2082,19 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                                 count =  (MAX_CREDITS - 16) * 65536;
                         }
                         needed_credits = (count - 1) / 65536 + 1;
-                        if (needed_credits > smb2->credits) {
+                        /* A non-positive balance must not be multiplied:
+                         * a negative int balance (server grants overflowed
+                         * it before the cap in socket.c existed) produced a
+                         * ~4 GiB request length that wrote past the
+                         * caller's buffer, and a zero balance produced a
+                         * zero-length read that looked like EOF once it was
+                         * finally sent. Ask for a single credit's worth
+                         * instead, so any grant unblocks it. */
+                        if (smb2->credits <= 0) {
+                                if (count > 65536) {
+                                        count = 65536;
+                                }
+                        } else if (needed_credits > smb2->credits) {
                                 count = smb2->credits * 65536;
                         }
                 } else {
@@ -2219,7 +2231,15 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                                 count =  (MAX_CREDITS - 16) * 65536;
                         }
                         needed_credits = (count - 1) / 65536 + 1;
-                        if (needed_credits > smb2->credits) {
+                        /* Same non-positive-balance guard as the read path:
+                         * a negative balance multiplied to a ~4 GiB length
+                         * that read the caller's buffer out of bounds and
+                         * shipped it to the server. */
+                        if (smb2->credits <= 0) {
+                                if (count > 65536) {
+                                        count = 65536;
+                                }
+                        } else if (needed_credits > smb2->credits) {
                                 count = smb2->credits * 65536;
                         }
                 } else {
