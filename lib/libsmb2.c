@@ -2247,6 +2247,19 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                                 count = 65536;
                         }
                 }
+                /*
+                 * smb2_encode_write_request() clamps !multi_credit
+                 * requests to 64 KiB when it sizes the payload iovec.
+                 * Apply the same clamp here: without it,
+                 * write_cb_data.count below would exceed the on-wire
+                 * amount, and a forged reply claiming the difference
+                 * (64 KiB < count <= this value) would pass the reply
+                 * check and silently skip bytes in sequential writes —
+                 * the window the earlier on-wire clamp missed.
+                 */
+                if (!smb2->supports_multi_credit && count > 65536) {
+                        count = 65536;
+                }
                 needed_credits = (count - 1) / 65536 + 1;
         }
 

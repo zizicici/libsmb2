@@ -353,12 +353,24 @@ smb2_random_bytes(void *buf, size_t len)
                 size_t done = 0;
 
                 while (done < len) {
-                        ssize_t count = getrandom(p + done, len - done, 0);
+                        ssize_t count = getrandom(p + done, len - done,
+                                                  GRND_NONBLOCK);
 
                         if (count < 0) {
                                 if (errno == EINTR) {
                                         continue;
                                 }
+                                /* EAGAIN: the CRNG is not seeded yet
+                                 * (early boot). Never block the client
+                                 * here — /dev/urandom below never blocks,
+                                 * which is the right trade for network
+                                 * nonces and challenges. */
+                                break;
+                        }
+                        if (count == 0) {
+                                /* Impossible per the syscall contract;
+                                 * guard against a broken wrapper that
+                                 * would spin this loop forever. */
                                 break;
                         }
                         done += (size_t)count;
