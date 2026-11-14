@@ -475,8 +475,14 @@ decode_dirents(struct smb2_context *smb2, struct smb2dir *dir,
 
                 /* NextEntryOffset is a uint32 from the wire: it must move
                  * forward and stay inside the buffer, or the walk can wrap
-                 * back and allocate entries forever */
-                if (fs.next_entry_offset > vec->len - offset) {
+                 * back and allocate entries forever. A non-final entry is
+                 * at least the fixed part of
+                 * FILE_ID_FULL_DIRECTORY_INFORMATION (80 bytes) — the
+                 * request pins that class — so smaller steps only overlap
+                 * entries and would amplify a small reply into one heap
+                 * allocation per few wire bytes. */
+                if ((fs.next_entry_offset != 0 && fs.next_entry_offset < 80)
+                    || fs.next_entry_offset > vec->len - offset) {
                         smb2_set_error(smb2, "Malformed query reply.");
                         return -1;
                 }

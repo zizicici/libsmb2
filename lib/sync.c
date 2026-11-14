@@ -93,7 +93,8 @@ static void sync_free_pending_pdu(struct smb2_context *smb2,
                 pending = 1;
         }
         if (pdu_on_list(smb2->outqueue, pdu) ||
-            pdu_on_list(smb2->waitqueue, pdu)) {
+            pdu_on_list(smb2->waitqueue, pdu) ||
+            pdu_on_list(smb2->nested_abort_list, pdu)) {
                 pending = 1;
         }
         if (pending && pdu->cb) {

@@ -390,6 +390,10 @@ smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+        /* A parked pdu is "queued but callback not yet invoked", which is
+         * exactly the state the documented cancel-by-free contract covers;
+         * without this unlink the drain loop would trip over the freed pdu. */
+        SMB2_LIST_REMOVE(&smb2->nested_abort_list, pdu);
 
         if (pdu->next_compound) {
                 smb2_free_pdu(smb2, pdu->next_compound);

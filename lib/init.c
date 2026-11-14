@@ -482,7 +482,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
          * fails), so repeat until all the queues are empty.
          */
         while (smb2->outqueue || smb2->pdu || smb2->next_pdu ||
-               smb2->waitqueue) {
+               smb2->waitqueue || smb2->nested_abort_list) {
                 while (smb2->outqueue) {
                         struct smb2_pdu *pdu = smb2->outqueue;
                         struct smb2_pdu *p;
@@ -534,28 +534,23 @@ void smb2_destroy_context(struct smb2_context *smb2)
                         }
                         smb2_free_pdu(smb2, pdu);
                 }
-        }
-        /*
-         * Parked chains cannot survive a legal abort window, but sweep them
-         * like the queues above as belt-and-braces against future reorders.
-         */
-        while (smb2->nested_abort_list) {
-                struct smb2_pdu *nested = smb2->nested_abort_list;
-                struct smb2_pdu *np;
+                while (smb2->nested_abort_list) {
+                        struct smb2_pdu *pdu = smb2->nested_abort_list;
+                        struct smb2_pdu *q;
 
-                smb2->nested_abort_list = nested->next;
-                nested->next = NULL;
-                for (np = nested; np; np = np->next_compound) {
-                        if (np->cb) {
-                                np->cb(smb2, SMB2_STATUS_SHUTDOWN,
-                                       NULL, np->cb_data);
+                        smb2->nested_abort_list = pdu->next;
+                        pdu->next = NULL;
+                        for (q = pdu; q; q = q->next_compound) {
+                                if (q->cb) {
+                                        q->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                              NULL, q->cb_data);
+                                }
+                        }
+                        if (!pdu->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, pdu);
                         }
                 }
-                if (!nested->caller_frees_pdu) {
-                        smb2_free_pdu(smb2, nested);
-                }
         }
-
         /*
          * Free any handles the caller did not close, as documented.
          * Callbacks above (e.g. a close racing the teardown) already
