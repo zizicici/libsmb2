@@ -1519,7 +1519,7 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                  * buffer: process it first so already-delivered replies
                  * complete their callers before the failure is reported.
                  */
-                if (revents & POLLIN) {
+                if (revents & POLLIN && SMB2_VALID_SOCKET(smb2->fd)) {
                         if (smb2_read_from_socket(smb2) != 0) {
                                 ret = -1;
                                 goto out;
