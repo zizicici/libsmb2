@@ -308,6 +308,13 @@ smb2_write_to_socket(struct smb2_context *smb2)
                          */
                         for (tmp_pdu = pdu; tmp_pdu;
                              tmp_pdu = tmp_pdu->next_compound) {
+                                if (niov + tmp_pdu->out.niov > SMB2_MAX_VECTORS) {
+                                        smb2_set_error(smb2, "Compound too "
+                                                       "large: more than %d "
+                                                       "io vectors.",
+                                                       SMB2_MAX_VECTORS);
+                                        return -1;
+                                }
                                 for (i = 0; i < tmp_pdu->out.niov;
                                      i++, niov++) {
                                         iov[niov].iov_base = tmp_pdu->out.iov[i].buf;
@@ -1473,9 +1480,10 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                 /*
                  * macOS reports a refused non-blocking connect as POLLHUP
                  * without POLLERR/POLLOUT. Complete a pending connect with
-                 * the real socket error, the way the POLLERR branch does,
-                 * instead of leaving it for context teardown (which can only
-                 * report a generic cancellation).
+                 * the real socket error, the way the POLLERR branch does —
+                 * including trying the next resolved address — instead of
+                 * leaving it for context teardown (which can only report a
+                 * generic cancellation).
                  */
                 if (smb2->connect_cb) {
                         int err = 0;
@@ -1486,12 +1494,33 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                                 err = errno;
                         }
                         if (err != 0) {
+                                if (!SMB2_VALID_SOCKET(smb2->fd) &&
+                                    smb2->next_addrinfo != NULL) {
+                                        smb2_close_connecting_fd(smb2, fd);
+                                        err = smb2_connect_async_next_addr(
+                                                smb2, smb2->next_addrinfo);
+                                        if (err == 0) {
+                                                return 0;
+                                        }
+                                }
                                 smb2_set_error(smb2, "smb2_service: socket error "
                                                 "%s(%d).",
                                                 strerror(err), err);
                                 smb2->connect_cb(smb2, err, NULL,
                                                  smb2->connect_data);
                                 smb2->connect_cb = NULL;
+                                ret = -1;
+                                goto out;
+                        }
+                }
+                /*
+                 * The peer hung up, but POLLIN may be set together with
+                 * POLLHUP when a final reply is still sitting in the socket
+                 * buffer: process it first so already-delivered replies
+                 * complete their callers before the failure is reported.
+                 */
+                if (revents & POLLIN) {
+                        if (smb2_read_from_socket(smb2) != 0) {
                                 ret = -1;
                                 goto out;
                         }

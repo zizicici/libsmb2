@@ -2693,8 +2693,9 @@ smb2_fstat_async(struct smb2_context *smb2, struct smb2fh *fh,
         next_pdu = smb2_cmd_query_info_async(smb2, &req, fstat_cb_1, stat_data);
         if (next_pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create query command");
-                smb2_free_pdu(smb2, pdu);
+                stat_data->cb(smb2, -ENOMEM, NULL, stat_data->cb_data);
                 free(stat_data);
+                smb2_free_pdu(smb2, pdu);
                 return -ENOMEM;
         }
         smb2_add_unrelated_compound_pdu(smb2, pdu, next_pdu);
@@ -2852,6 +2853,7 @@ smb2_getinfo_async(struct smb2_context *smb2, const char *path,
                                                      stat_data);
                 if (next_pdu == NULL) {
                         smb2_set_error(smb2, "Failed to create query command");
+                        stat_data->cb(smb2, -ENOMEM, NULL, stat_data->cb_data);
                         free(stat_data);
                         smb2_free_pdu(smb2, pdu);
                         return -1;
@@ -2872,6 +2874,7 @@ smb2_getinfo_async(struct smb2_context *smb2, const char *path,
                                              getinfo_cb_2, stat_data);
         if (next_pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create query command");
+                stat_data->cb(smb2, -ENOMEM, NULL, stat_data->cb_data);
                 free(stat_data);
                 smb2_free_pdu(smb2, pdu);
                 return -1;
@@ -3052,6 +3055,7 @@ smb2_truncate_async(struct smb2_context *smb2, const char *path,
         if (next_pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create set command. %s",
                                smb2_get_error(smb2));
+                trunc_data->cb(smb2, -ENOMEM, NULL, trunc_data->cb_data);
                 free(trunc_data);
                 smb2_free_pdu(smb2, pdu);
                 return -EINVAL;
@@ -3236,6 +3240,7 @@ smb2_new_name_async(struct smb2_context *smb2, const char *oldpath,
         if (next_pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create set command. %s",
                                smb2_get_error(smb2));
+                new_name_data->cb(smb2, -ENOMEM, NULL, new_name_data->cb_data);
                 free_new_name_data(new_name_data);
                 smb2_free_pdu(smb2, pdu);
                 return -EINVAL;
