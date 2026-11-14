@@ -793,9 +793,26 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                          * so the drain loop always terminates.
                          */
                         if (smb2->nested_abort_budget-- <= 0) {
+                                struct smb2_pdu *q;
+                                /*
+                                 * Complete the chain (the submitter got a
+                                 * successful return, so its callback must
+                                 * run) but do not let it park again: the
+                                 * budget is exhausted, so anything its
+                                 * callbacks queue synchronously is freed
+                                 * without completing. This branch cannot
+                                 * recurse.
+                                 */
                                 smb2_set_error(smb2, "Too many commands "
                                                "queued during command "
                                                "abort.");
+                                for (q = pdu; q; q = q->next_compound) {
+                                        if (q->cb) {
+                                                q->cb(smb2,
+                                                      SMB2_STATUS_SHUTDOWN,
+                                                      NULL, q->cb_data);
+                                        }
+                                }
                                 if (!pdu->caller_frees_pdu) {
                                         smb2_free_pdu(smb2, pdu);
                                 }
