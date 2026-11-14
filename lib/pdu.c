@@ -776,16 +776,14 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                 if (smb2->in_queue_abort) {
                         /*
                          * A callback fired by the outer abort synchronously
-                         * queued this. Firing its callbacks could recurse
-                         * again without bound, so free the chain as-is: the
-                         * caller learns of the failure from the error state
-                         * (its command never completed on the wire).
+                         * queued this. Completing it here would recurse
+                         * without bound, and dropping it would break the
+                         * async contract (the submitter got a successful
+                         * return, so its callback must run): park the
+                         * chain; the outer abort completes it below.
                          */
-                        smb2_set_error(smb2, "Cannot queue a command while "
-                                       "another one is being aborted.");
-                        if (!pdu->caller_frees_pdu) {
-                                smb2_free_pdu(smb2, pdu);
-                        }
+                        pdu->next = smb2->nested_abort_list;
+                        smb2->nested_abort_list = pdu;
                         return;
                 }
                 smb2->in_queue_abort = 1;
@@ -793,6 +791,27 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         if (p->cb) {
                                 p->cb(smb2, SMB2_STATUS_SHUTDOWN,
                                       NULL, p->cb_data);
+                        }
+                }
+                /*
+                 * Complete the chains parked by callbacks, iteratively: a
+                 * callback run here may park another chain, which this
+                 * loop then picks up. Each parked chain is fired and freed
+                 * exactly once.
+                 */
+                while (smb2->nested_abort_list) {
+                        struct smb2_pdu *nested = smb2->nested_abort_list;
+
+                        smb2->nested_abort_list = nested->next;
+                        nested->next = NULL;
+                        for (p = nested; p; p = p->next_compound) {
+                                if (p->cb) {
+                                        p->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                              NULL, p->cb_data);
+                                }
+                        }
+                        if (!nested->caller_frees_pdu) {
+                                smb2_free_pdu(smb2, nested);
                         }
                 }
                 smb2->in_queue_abort = 0;
