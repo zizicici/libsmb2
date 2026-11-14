@@ -279,6 +279,13 @@ struct smb2_context {
         struct smb2_pdu *waitqueue;
 
         /*
+         * Handles the caller has not closed yet; swept by
+         * smb2_destroy_context().
+         */
+        struct smb2fh *fhs;
+        struct smb2dir *dirs;
+
+        /*
          * For receiving PDUs
          */
         struct smb2_io_vectors in;
@@ -455,6 +462,12 @@ struct smb2dir {
         struct smb2_dirent_internal *entries;
         struct smb2_dirent_internal *current_entry;
         int index;
+
+        /* All open smb2dir are tracked on their context, so
+         * smb2_destroy_context() can free the ones the caller did not
+         * close, as its contract promises. Doubly linked: opendir
+         * cancellation frees the dir without a context to look it up. */
+        struct smb2dir *next, **prev;
 };
 
 
@@ -826,6 +839,12 @@ struct connect_data;                                           /* defined in lib
 void free_c_data(struct smb2_context*, struct connect_data*);  /* defined in libsmb2.c */
 
 int smb2_write_to_socket(struct smb2_context *smb2);
+
+/* Free a handle/dir and unlink it from its context's sweep list.
+ * smb2 may be NULL (cancellation paths unlink through the embedded
+ * back-pointers). Defined in libsmb2.c. */
+void free_smb2fh(struct smb2_context *smb2, struct smb2fh *fh);
+void free_smb2dir(struct smb2_context *smb2, struct smb2dir *dir);
         
 #ifdef __cplusplus
 }

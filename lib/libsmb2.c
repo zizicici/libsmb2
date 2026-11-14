@@ -193,6 +193,12 @@ struct smb2fh {
          */
         struct smb2_pdu *cancel_pdu;
         void (*cancel_free_cb)(void *);
+
+        /* All open smb2fh are tracked on their context, so
+         * smb2_destroy_context() can free the ones the caller did not
+         * close, as its contract promises. Doubly linked: smb2_open's
+         * cancellation path frees the fh without a context to look it up. */
+        struct smb2fh *next, **prev;
 };
 
 void
@@ -232,9 +238,39 @@ send_session_setup_request(struct smb2_context *smb2,
                            struct connect_data *c_data,
                            unsigned char *buf, int len);
 
+/* Track an open handle on its context so smb2_destroy_context() can free
+ * the ones the caller never closed. */
 static void
+smb2_track_fh(struct smb2_context *smb2, struct smb2fh *fh)
+{
+        fh->prev = &smb2->fhs;
+        fh->next = smb2->fhs;
+        if (fh->next) {
+                fh->next->prev = &fh->next;
+        }
+        smb2->fhs = fh;
+}
+
+static void
+smb2_track_dir(struct smb2_context *smb2, struct smb2dir *dir)
+{
+        dir->prev = &smb2->dirs;
+        dir->next = smb2->dirs;
+        if (dir->next) {
+                dir->next->prev = &dir->next;
+        }
+        smb2->dirs = dir;
+}
+
+void
 free_smb2dir(struct smb2_context *smb2, struct smb2dir *dir)
 {
+        if (dir->prev) {
+                *dir->prev = dir->next;
+        }
+        if (dir->next) {
+                dir->next->prev = dir->prev;
+        }
         while (dir->entries) {
                 struct smb2_dirent_internal *e = dir->entries->next;
 
@@ -617,6 +653,7 @@ _smb2_opendir_async(struct smb2_context *smb2, const char *path,
         }
         dir->cb = cb;
         dir->cb_data = cb_data;
+        smb2_track_dir(smb2, dir);
 
         memset(&req, 0, sizeof(struct smb2_create_request));
         req.requested_oplock_level = SMB2_OPLOCK_LEVEL_NONE;
@@ -1439,9 +1476,15 @@ smb2_connect_share_async(struct smb2_context *smb2,
         return 0;
 }
 
-static void
+void
 free_smb2fh(struct smb2_context *smb2 _U_, struct smb2fh *fh)
 {
+        if (fh->prev) {
+                *fh->prev = fh->next;
+        }
+        if (fh->next) {
+                fh->next->prev = fh->prev;
+        }
         free(fh->path);
         free(fh);
 }
@@ -1764,6 +1807,7 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
         fh->cb = cb;
         fh->cb_data = cb_data;
         fh->flags = flags;
+        smb2_track_fh(smb2, fh);
 
         /*
          * An open that asked for a lease can not be retried behind the
@@ -4307,6 +4351,7 @@ smb2_fh_from_file_id(struct smb2_context *smb2, smb2_file_id *fileid)
                 return NULL;
         }
         memcpy(fh->file_id, fileid, SMB2_FD_SIZE);
+        smb2_track_fh(smb2, fh);
 
         return fh;
 }
