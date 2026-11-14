@@ -286,6 +286,11 @@ struct smb2_context {
          * parked chains iteratively once its own callbacks have run. */
         int in_queue_abort;
         struct smb2_pdu *nested_abort_list;
+        /* Parking budget per abort window: real nesting is 1-3 levels; a
+         * callback that re-queues on every completion could otherwise spin
+         * the drain loop forever. Beyond the budget the chain is dropped
+         * (with an error set) instead of parked. */
+        int nested_abort_budget;
 
         /*
          * Handles the caller has not closed yet; swept by

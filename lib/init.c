@@ -536,6 +536,27 @@ void smb2_destroy_context(struct smb2_context *smb2)
                 }
         }
         /*
+         * Parked chains cannot survive a legal abort window, but sweep them
+         * like the queues above as belt-and-braces against future reorders.
+         */
+        while (smb2->nested_abort_list) {
+                struct smb2_pdu *nested = smb2->nested_abort_list;
+                struct smb2_pdu *np;
+
+                smb2->nested_abort_list = nested->next;
+                nested->next = NULL;
+                for (np = nested; np; np = np->next_compound) {
+                        if (np->cb) {
+                                np->cb(smb2, SMB2_STATUS_SHUTDOWN,
+                                       NULL, np->cb_data);
+                        }
+                }
+                if (!nested->caller_frees_pdu) {
+                        smb2_free_pdu(smb2, nested);
+                }
+        }
+
+        /*
          * Free any handles the caller did not close, as documented.
          * Callbacks above (e.g. a close racing the teardown) already
          * unlinked theirs.

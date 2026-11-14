@@ -781,12 +781,28 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                          * async contract (the submitter got a successful
                          * return, so its callback must run): park the
                          * chain; the outer abort completes it below.
+                         * Head insertion: parked chains complete in reverse
+                         * submission order (there is no ordering contract
+                         * between them). A pathological submitter that
+                         * re-queues on every completion exhausts the budget
+                         * and its chain is dropped with an error instead,
+                         * so the drain loop always terminates.
                          */
+                        if (smb2->nested_abort_budget-- <= 0) {
+                                smb2_set_error(smb2, "Too many commands "
+                                               "queued during command "
+                                               "abort.");
+                                if (!pdu->caller_frees_pdu) {
+                                        smb2_free_pdu(smb2, pdu);
+                                }
+                                return;
+                        }
                         pdu->next = smb2->nested_abort_list;
                         smb2->nested_abort_list = pdu;
                         return;
                 }
                 smb2->in_queue_abort = 1;
+                smb2->nested_abort_budget = 64;
                 for (p = pdu; p; p = p->next_compound) {
                         if (p->cb) {
                                 p->cb(smb2, SMB2_STATUS_SHUTDOWN,
