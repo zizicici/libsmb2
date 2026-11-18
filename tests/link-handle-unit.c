@@ -64,7 +64,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
                 assert(pdu->out.iov[2].buf[0] == 1);
         }
         if (smb2->passthrough) {
-                pdu->cb(smb2, SMB2_STATUS_PENDING, NULL, pdu->cb_data);
+                assert(!pdu->report_pending);
                 assert(result->completed == 0 && smb2->waitqueue == pdu);
         }
         smb2->waitqueue = pdu->next;

@@ -719,19 +719,15 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
         return ret;
 }
 
-int
-smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
+static int
+queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
 {
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
 
-        /* Report only this call. The caller reads queue_rejected before
-         * it returns, so the next call may clear it. The outer abort
-         * clears it again after its own callbacks, which did run. */
-        smb2->queue_rejected = 0;
-
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
+                p->report_pending = report_pending;
                 if (smb2_is_server(smb2)) {
                         /* set reply flag, servers will only reply */
                         pdu->header.flags |= SMB2_FLAGS_SERVER_TO_REDIR;
@@ -746,7 +742,7 @@ smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
                          */
                         if (!pdu->header.message_id && pdu->header.command != SMB2_NEGOTIATE) {
                                 smb2_set_error(smb2, "Queued pdu has no message id");
-                                smb2->queue_rejected = 1;
+
                                 if (!pdu->caller_frees_pdu) {
                                         smb2_free_pdu(smb2, pdu);
                                 }
@@ -802,7 +798,7 @@ smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
                          * still owns a caller_frees pdu and must not wait
                          * for a callback.
                          */
-                        smb2->queue_rejected = 1;
+
                         smb2_set_error(smb2, "Cannot queue a command while "
                                        "another one is being aborted.");
                         if (!pdu->caller_frees_pdu) {
@@ -818,9 +814,6 @@ smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         }
                 }
                 smb2->in_queue_abort = 0;
-                /* Nested queues set this. This call did fire its own
-                 * callbacks, so its caller must not treat it as rejected. */
-                smb2->queue_rejected = 0;
                 if (!pdu->caller_frees_pdu) {
                         smb2_free_pdu(smb2, pdu);
                 }
@@ -842,6 +835,20 @@ smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
 
         smb2_add_to_outqueue(smb2, pdu);
         return 0;
+}
+
+/* Library operations complete once. Raw passthrough clients can also
+ * observe intermediate replies, for example to relay a pending AsyncId. */
+int
+smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        return queue_pdu(smb2, pdu, 0);
+}
+
+int
+smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        return queue_pdu(smb2, pdu, 1);
 }
 
 void

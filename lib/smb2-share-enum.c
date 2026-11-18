@@ -255,7 +255,7 @@ share_enum_done(struct share_enum *se, int status, int smb2_status,
                 pdu = smb2_cmd_close_async(smb2, &req, share_enum_close_cb,
                                            NULL);
                 if (pdu) {
-                        smb2_queue_pdu(smb2, pdu);
+                        smb2_queue_pdu_final(smb2, pdu);
                 }
         }
         share_enum_free(se);
@@ -713,10 +713,9 @@ share_enum_read_more(struct share_enum *se)
                 return -1;
         }
         /* Queueing can fail the PDU synchronously (e.g. sealing without
-         * keys): the callback frees `se` before smb2_queue_pdu() returns,
+         * keys): the callback frees `se` before smb2_queue_pdu_final() returns,
          * so only the hoisted context may be touched afterwards. */
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 return -EIO;
         }
         return 0;
@@ -836,8 +835,7 @@ share_enum_send_request(struct share_enum *se)
         if (pdu == NULL) {
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 return -EIO;
         }
         return 0;
@@ -933,8 +931,7 @@ share_enum_send_bind(struct share_enum *se)
         {
                 struct smb2_context *smb2 = se->smb2;
 
-                smb2_queue_pdu(smb2, pdu);
-                if (smb2->queue_rejected) {
+                if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                         return -EIO;
                 }
         }
@@ -1019,8 +1016,7 @@ smb2_share_enum_async(struct smb2_context *smb2,
                 smb2_set_error(smb2, "Failed to create srvsvc open");
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 share_enum_free(se);
                 return -EIO;
         }

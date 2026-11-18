@@ -281,10 +281,9 @@ struct smb2_context {
         /* Set while the encryption-abort path in smb2_queue_pdu() fires
          * the aborted chain's callbacks. A callback that queues another
          * command must not re-enter that path: the new chain is not
-         * fired, and queue_rejected is set so the caller can free its
+         * fired, and queueing returns an error so the caller can free its
          * state and return an error instead of promising a callback. */
         int in_queue_abort;
-        int queue_rejected;
 
         /*
          * Handles the caller has not closed yet; swept by
@@ -391,6 +390,7 @@ struct smb2_pdu {
         int unrelated_compound;
 
         int caller_frees_pdu;
+        int report_pending; /* raw passthrough callbacks only */
         /*
          * Set for the negotiate and session setup pdus that take part in
          * the SMB3.1.1 preauth integrity hash. The hash has to be taken
@@ -840,6 +840,7 @@ int smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
 
 int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
+int smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */

@@ -520,7 +520,7 @@ close_abandoned_file(struct smb2_context *smb2, uint32_t tree_id, smb2_file_id f
         pdu = smb2_cmd_close_async(smb2, &req, abandoned_close_cb, NULL);
         if (pdu) {
                 smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
-                smb2_queue_pdu(smb2, pdu);
+                smb2_queue_pdu_final(smb2, pdu);
         }
 }
 
@@ -593,9 +593,6 @@ od_close_cb(struct smb2_context *smb2, int status,
 {
         struct smb2dir *dir = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         dir->server_handle_open = 0;
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
@@ -618,9 +615,6 @@ query_cb(struct smb2_context *smb2, int status,
         struct smb2dir *dir = private_data;
         struct smb2_query_directory_reply *rep = command_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (dir->cb == NULL) {
                 close_abandoned_file(smb2, dir->tree_id, dir->file_id);
                 free_smb2dir(smb2, dir);
@@ -656,7 +650,7 @@ query_cb(struct smb2_context *smb2, int status,
                         return;
                 }
                 smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
-                if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+                if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                         opendir_complete(smb2, dir, -EIO);
                         return;
                 }
@@ -679,7 +673,7 @@ query_cb(struct smb2_context *smb2, int status,
                         return;
                 }
                 smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
-                if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+                if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                         opendir_complete(smb2, dir, -EIO);
                         return;
                 }
@@ -699,10 +693,6 @@ static void
 dispatch_create(struct smb2_pdu *owner, smb2_command_cb complete,
                 struct smb2_context *smb2, int status, void *reply, void *data)
 {
-        /* Passthrough also reports intermediate asynchronous responses. */
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (owner && owner->cancel_in_flight) {
                 owner->free_cb = owner->cancel_in_flight;
                 owner->cancel_in_flight = NULL;
@@ -755,7 +745,7 @@ opendir_created(struct smb2_context *smb2, int status,
                 return;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
-        if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 opendir_complete(smb2, dir, -EIO);
         }
 }
@@ -821,8 +811,7 @@ _smb2_opendir_async(struct smb2_context *smb2, const char *path,
                 pdu->cancel_in_flight = abandon_opendir;
         }
         pdu->caller_frees_pdu = caller_frees_pdu;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 /* Same as a failed create: the callback does not run, and
                  * free_cb is only for an explicit cancel of a returned pdu. */
                 if (caller_frees_pdu) {
@@ -1230,8 +1219,7 @@ session_setup_cb(struct smb2_context *smb2, int status,
                         free_c_data(smb2, c_data);
                         return;
                 }
-                smb2_queue_pdu(smb2, pdu);
-                if (smb2->queue_rejected) {
+                if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                         smb2_close_context(smb2);
                         c_data->cb(smb2, -EIO, NULL, c_data->cb_data);
                         free_c_data(smb2, c_data);
@@ -1290,8 +1278,7 @@ send_session_setup_request(struct smb2_context *smb2,
                 return -ENOMEM;
         }
         pdu->update_preauth_hash = 1;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 return -EIO;
         }
 
@@ -1556,8 +1543,7 @@ connect_cb(struct smb2_context *smb2, int status,
                 return;
         }
         pdu->update_preauth_hash = 1;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 c_data->cb(smb2, -EIO, NULL, c_data->cb_data);
                 free_c_data(smb2, c_data);
         }
@@ -1888,7 +1874,7 @@ open_retry(struct smb2_context *smb2, struct smb2fh *fh)
                 return -1;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, fh->open_tree_id);
-        return smb2_queue_pdu_checked(smb2, pdu);
+        return smb2_queue_pdu_final(smb2, pdu);
 }
 
 static void
@@ -2087,8 +2073,7 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
                 pdu->cancel_in_flight = abandon_open;
         }
         pdu->caller_frees_pdu = caller_frees_pdu;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 /* Same as a failed create: the callback does not run, and
                  * free_cb is only for an explicit cancel of a returned pdu. */
                 if (caller_frees_pdu) {
@@ -2165,7 +2150,7 @@ queue_io_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu,
                 struct file_io *io = cb_data;
                 smb2_set_tree_id_for_pdu(smb2, pdu, io->tree_id);
         }
-        return smb2_queue_pdu_checked(smb2, pdu);
+        return smb2_queue_pdu_final(smb2, pdu);
 }
 
 static void
@@ -2174,9 +2159,6 @@ close_cb(struct smb2_context *smb2, int status,
 {
         struct smb2fh *fh = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
@@ -2228,9 +2210,6 @@ static void
 fsync_cb(struct smb2_context *smb2, int status,
          void *command_data _U_, void *private_data)
 {
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Flush failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
@@ -2289,9 +2268,6 @@ read_cb(struct smb2_context *smb2, int status,
         int positioned = rd->cb != file_io_done;
         int result;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status == SMB2_STATUS_END_OF_FILE) {
                 result = 0;
         } else if (status) {
@@ -2430,9 +2406,6 @@ write_cb(struct smb2_context *smb2, int status,
         int positioned = wd->cb != file_io_done;
         int result;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status == SMB2_STATUS_END_OF_FILE) {
                 result = 0;
         } else if (status) {
@@ -2813,9 +2786,6 @@ create_cb_2(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (create_data->status == SMB2_STATUS_SUCCESS) {
                 create_data->status = status;
         }
@@ -2828,9 +2798,6 @@ create_cb_1(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS &&
             !((uint32_t)status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
               create_data->unlink_path)) {
@@ -2918,8 +2885,7 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
                 }
         }
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
@@ -2995,8 +2961,7 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(create_data);
                 return -EIO;
         }
@@ -3204,8 +3169,7 @@ smb2_fstat_async(struct smb2_context *smb2, struct smb2fh *fh,
 
         /* attribute tag query + info query */
         stat_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(stat_data);
                 return -EIO;
         }
@@ -3402,8 +3366,7 @@ smb2_getinfo_async(struct smb2_context *smb2, const char *path,
         stat_data->pending =
                 (info_type == SMB2_0_INFO_FILE &&
                  file_info_class == SMB2_FILE_ALL_INFORMATION) ? 4 : 3;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(stat_data);
                 return -EIO;
         }
@@ -3583,8 +3546,7 @@ smb2_truncate_async(struct smb2_context *smb2, const char *path,
 
         /* create + set info + close */
         trunc_data->pending = 3;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(trunc_data);
                 return -EIO;
         }
@@ -3770,8 +3732,7 @@ smb2_new_name_async(struct smb2_context *smb2, const char *oldpath,
 
         /* create + set info + close */
         new_name_data->pending = 3;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free_new_name_data(new_name_data);
                 return -EIO;
         }
@@ -3807,9 +3768,6 @@ static void
 ftruncate_cb(struct smb2_context *smb2, int status,
              void *command_data _U_, void *private_data)
 {
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Truncate failed with "
                                  "(0x%08x) %s", status, nterror_to_str(status));
@@ -3892,9 +3850,6 @@ static void
 link_close_cb(struct smb2_context *smb2, int status,
               void *command_data _U_, void *private_data)
 {
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         link_finish(smb2, private_data, status);
 }
 
@@ -3906,7 +3861,7 @@ link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
         data->close_pdu = NULL;
         smb2_set_close_file_id(pdu, data->file_id);
         pdu->timeout = smb2->timeout ? time(NULL) + smb2->timeout : 0;
-        if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
 }
@@ -3925,7 +3880,7 @@ link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
                 return -ENOMEM;
         }
         smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
-        if (smb2_queue_pdu_checked(smb2, create) < 0) {
+        if (smb2_queue_pdu_final(smb2, create) < 0) {
                 smb2_free_pdu(smb2, data->close_pdu);
                 free_symlink_data(data);
                 return -EIO;
@@ -3939,9 +3894,6 @@ link_disposition_cb(struct smb2_context *smb2, int status,
 {
         struct symlink_cb_data *data = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if ((uint32_t)status == SMB2_STATUS_SHUTDOWN) {
                 link_finish(smb2, data, status);
                 return;
@@ -3992,8 +3944,7 @@ link_request_done(struct smb2_context *smb2, struct symlink_cb_data *data,
                 return;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, data->tree_id);
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
 }
@@ -4005,9 +3956,6 @@ link_open_cb(struct smb2_context *smb2, int status,
         struct symlink_cb_data *data = private_data;
         struct smb2_create_reply *rep = command_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status == SMB2_STATUS_SUCCESS) {
                 memcpy(data->file_id, rep->file_id, SMB2_FD_SIZE);
                 data->opened = 1;
@@ -4021,9 +3969,6 @@ symlink_ioctl_cb(struct smb2_context *smb2, int status,
 {
         struct symlink_cb_data *data = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         /* Clean up the placeholder if converting it into a link failed. */
         data->delete_on_close = status != SMB2_STATUS_SUCCESS;
         link_request_done(smb2, data, status);
@@ -4038,9 +3983,6 @@ unlink_dir_tag_cb(struct smb2_context *smb2, int status,
         struct smb2_file_attribute_tag_info *tag;
         struct smb2_stat_64 st;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status == SMB2_STATUS_SUCCESS) {
                 tag = rep->output_buffer;
                 if (tag == NULL) {
@@ -4491,8 +4433,7 @@ smb2_readlink_async(struct smb2_context *smb2, const char *path,
 
         /* create + ioctl + close */
         readlink_data->pending = 3;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(readlink_data);
                 return -EIO;
         }
@@ -4514,9 +4455,6 @@ smb2_ioctl_output_cb(struct smb2_context *smb2, int status,
         struct smb2_ioctl_cb_data *ioctl_data = private_data;
         void *output = NULL;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
         }
@@ -4660,8 +4598,7 @@ smb2_copychunk_submit_async(struct smb2_context *smb2,
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, dst_tree_id);
         ioctl_data->pdu = pdu;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(ioctl_data->input);
                 free(ioctl_data);
                 return -EIO;
@@ -4707,8 +4644,7 @@ smb2_request_resume_key_async(struct smb2_context *smb2, struct smb2fh *fh,
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
         ioctl_data->pdu = pdu;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(ioctl_data);
                 return -EIO;
         }
@@ -4851,9 +4787,6 @@ disconnect_cb_2(struct smb2_context *smb2, int status,
 {
         struct disconnect_data *dc_data = private_data;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Logoff failed: %s",
                                  nterror_to_str(status));
@@ -4870,9 +4803,6 @@ disconnect_cb_1(struct smb2_context *smb2, int status,
         struct disconnect_data *dc_data = private_data;
         struct smb2_pdu *pdu;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
                 dc_data->cb(smb2, -nterror_to_errno(status), NULL,
@@ -4886,8 +4816,7 @@ disconnect_cb_1(struct smb2_context *smb2, int status,
                 free(dc_data);
                 return;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 dc_data->cb(smb2, -EIO, NULL, dc_data->cb_data);
                 free(dc_data);
         }
@@ -4923,8 +4852,7 @@ smb2_disconnect_share_async(struct smb2_context *smb2,
                 free(dc_data);
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(dc_data);
                 return -EIO;
         }
@@ -4977,8 +4905,7 @@ smb2_echo_async(struct smb2_context *smb2,
                 free(echo_data);
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(echo_data);
                 return -EIO;
         }
@@ -5092,7 +5019,7 @@ smb2_oplock_break_notify(struct smb2_context *smb2, int status, void *command_da
                                 return;
                 }
                 if (pdu != NULL) {
-                        smb2_queue_pdu(smb2, pdu);
+                        smb2_queue_pdu_final(smb2, pdu);
                 }
         }
 }
@@ -5195,9 +5122,6 @@ notify_change_cb(struct smb2_context *smb2, int status, void *command_data, void
         struct smb2_file_notify_change_information *changes = NULL;
         int rc = 0;
 
-        if (status == SMB2_STATUS_PENDING) {
-                return;
-        }
         if ((uint32_t)status == SMB2_STATUS_NOTIFY_ENUM_DIR ||
             (uint32_t)status == SMB2_STATUS_NOTIFY_CLEANUP) {
                 rc = status;
@@ -5243,7 +5167,7 @@ submit_notify(struct smb2_context *smb2, struct notify_change_cb_data *watch)
                 return -ENOMEM;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, watch->tree_id);
-        return smb2_queue_pdu_checked(smb2, pdu);
+        return smb2_queue_pdu_final(smb2, pdu);
 }
 
 static void
