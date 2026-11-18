@@ -2224,72 +2224,33 @@ submit_close(struct smb2_context *smb2, struct smb2fh *fh,
         return 0;
 }
 
-struct fsync_data {
-        smb2_command_cb cb;
-        void *cb_data;
-};
-
 static void
 fsync_cb(struct smb2_context *smb2, int status,
-         void *command_data, void *private_data)
+         void *command_data _U_, void *private_data)
 {
-        struct fsync_data *fsd = private_data;
-
         if (status == SMB2_STATUS_PENDING) {
                 return;
         }
-
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Flush failed with (0x%08x) %s",
-                               status, nterror_to_str(status));
-                fsd->cb(smb2, -nterror_to_errno(status), NULL, fsd->cb_data);
-                free(fsd);
-                return;
+                                 status, nterror_to_str(status));
         }
-
-        fsd->cb(smb2, 0, NULL, fsd->cb_data);
-        free(fsd);
+        file_io_done(smb2, -nterror_to_errno(status), NULL, private_data);
 }
 
 static int
-submit_fsync(struct smb2_context *smb2, struct smb2fh *fh,
-                 smb2_command_cb cb, void *cb_data)
+submit_fsync(struct smb2_context *smb2, struct file_io *io)
 {
-        struct smb2_flush_request req;
-        struct fsync_data *fsd;
+        struct smb2_flush_request req = {0};
         struct smb2_pdu *pdu;
 
-        if (smb2 == NULL) {
-            return -EINVAL;
-        }
-        if (fh == NULL) {
-            smb2_set_error(smb2, "File handle was NULL");
-            return -EINVAL;
-        }
-
-        fsd = calloc(1, sizeof(struct fsync_data));
-        if (fsd == NULL) {
-                smb2_set_error(smb2, "Failed to allocate fsync_data");
-                return -ENOMEM;
-        }
-        fsd->cb = cb;
-        fsd->cb_data = cb_data;
-
-        memset(&req, 0, sizeof(struct smb2_flush_request));
-        memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
-
-        pdu = smb2_cmd_flush_async(smb2, &req, fsync_cb, fsd);
+        memcpy(req.file_id, io->fh->file_id, SMB2_FD_SIZE);
+        pdu = smb2_cmd_flush_async(smb2, &req, fsync_cb, io);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create flush command");
-                free(fsd);
                 return -ENOMEM;
         }
-        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
-                free(fsd);
-                return -EIO;
-        }
-
-        return 0;
+        return queue_io_pdu(smb2, pdu, file_io_done, io);
 }
 
 static void
@@ -2620,7 +2581,7 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         case SMB2_SET_INFO:
                 return submit_ftruncate(smb2, io);
         case SMB2_FLUSH:
-                return submit_fsync(smb2, fh, file_io_done, io);
+                return submit_fsync(smb2, io);
         case SMB2_CLOSE:
                 if (fh->pending_positioned) {
                         fh->waiting_close = io;
