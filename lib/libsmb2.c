@@ -2428,6 +2428,10 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
         }
         io = calloc(1, sizeof(*io));
         if (io == NULL) {
+                if (position) {
+                        smb2_set_error(smb2, "Failed to allocate %s request",
+                                       command == SMB2_READ ? "read" : "write");
+                }
                 return -ENOMEM;
         }
         io->fh = fh;
