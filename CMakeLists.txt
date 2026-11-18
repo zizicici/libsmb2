@@ -96,6 +96,7 @@ endif()
     endif()
   endif()
 
+  set(core_DEPENDS "")
   # Kerberos. On Apple with GSS.framework, link only that framework (and
   # Kerberos.framework); see the block below for why the two paths must
   # not mix. Otherwise we use gss_* symbols from gssapi_krb5 and krb5_*
@@ -136,11 +137,11 @@ endif()
         # path, not -L, so this keeps header and implementation
         # guaranteed to match, regardless of what else the library
         # search path turns up.
-        set(core_DEPENDS "-framework GSS" "-framework Kerberos" CACHE STRING "" FORCE)
+        set(core_DEPENDS "-framework GSS" "-framework Kerberos")
       else()
         find_package(GSSAPI)
         if(GSSAPI_FOUND)
-          set(core_DEPENDS ${GSSAPI_LIBRARIES} CACHE STRING "" FORCE)
+          set(core_DEPENDS ${GSSAPI_LIBRARIES})
         else()
           # Compiling the kerberos paths in when there is no library to link
           # them against only moves the failure to link time, so build
