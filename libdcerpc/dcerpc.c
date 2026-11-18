@@ -2861,6 +2861,7 @@ dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
         struct dcerpc_frag_read *fr;
         struct smb2_read_request req;
         struct smb2_pdu *smb2_pdu;
+        int rc;
 
         fr = calloc(1, sizeof(*fr));
         if (fr == NULL) {
@@ -2888,12 +2889,12 @@ dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 free(fr);
                 return -ENOMEM;
         }
-        if (smb2_queue_pdu_checked(dce->smb2, smb2_pdu) < 0) {
+        rc = smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
+        if (rc < 0) {
                 free(fr->buf);
                 free(fr);
-                return -EIO;
         }
-        return 0;
+        return rc;
 }
 
 /*
@@ -2910,8 +2911,9 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
 
         st = dce_frags_status(dce, pdu, pdu->reasm_buf, pdu->reasm_len);
         if (st == DCE_FRAG_NEED_MORE) {
-                if (dcerpc_read_more_frags(dce, pdu)) {
-                        dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                int rc = dcerpc_read_more_frags(dce, pdu);
+                if (rc < 0) {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, rc, NULL);
                 }
                 return;
         }

@@ -83,6 +83,16 @@ smb2_cmd_ioctl_async(struct smb2_context *smb2 _U_,
 }
 
 struct smb2_pdu *
+smb2_cmd_read_async(struct smb2_context *smb2 _U_,
+                    struct smb2_read_request *req _U_,
+                    smb2_command_cb cb, void *cb_data)
+{
+        last_cb = cb;
+        last_priv = cb_data;
+        return (struct smb2_pdu *)&dummy_pdu;
+}
+
+struct smb2_pdu *
 smb2_cmd_write_async(struct smb2_context *smb2 _U_,
                      struct smb2_write_request *req _U_, int flags _U_,
                      smb2_command_cb cb, void *cb_data)
@@ -382,6 +392,15 @@ test_queue_rejection(void)
         queue_result = 0;
         session_close(&s);
         CHECK(!cb_done);
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        queue_result = -EIO;
+        /* Only the first bytes fit in TRANSCEIVE. The follow-up READ fails. */
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 8);
+        CHECK(cb_done && cb_status == -EIO);
+        queue_result = 0;
+        session_close(&s);
 }
 #endif
 
