@@ -9,6 +9,8 @@ Name: libsmb2
 Description: libsmb2 is a client library for accessing SMB shares over a network.
 Version: @PROJECT_VERSION@
 Requires:
+Requires.private: @SMB2_PC_REQUIRES@
 Conflicts:
 Libs: -L${libdir} -lsmb2
+Libs.private: @SMB2_PC_PRIVATE_LIBS@
 Cflags: -I${includedir}

@@ -116,6 +116,7 @@ SYS=
 
 case $host in
   *solaris*)
+    LIBSOCKET="-lsocket -lnsl"
     AC_CHECK_LIB([socket], [main], , [AC_MSG_ERROR([Can not find required library])])
     AC_CHECK_LIB([nsl],    [main], , [AC_MSG_ERROR([Can not find required library])])
     ;;
@@ -262,6 +263,21 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ], [
     AC_MSG_NOTICE([Build WITHOUT OpenSSL])
 ])
+SMB2_PC_REQUIRES=""
+SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
+AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
+    AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
+    AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
+        SMB2_PC_REQUIRES="libcrypto >= 3"
+        SMB2_PC_CRYPTO_LIBS=""
+    ], [
+        for flag in $LDFLAGS; do
+            AS_CASE([$flag], [-L*], [SMB2_PC_CRYPTO_LIBS="$flag $SMB2_PC_CRYPTO_LIBS"])
+        done
+    ])
+])
+AC_SUBST([SMB2_PC_REQUIRES])
+AC_SUBST([SMB2_PC_CRYPTO_LIBS])
 AC_SUBST([MAYBE_LIBCRYPTO])
 AC_SUBST([LIBSOCKET])
 
