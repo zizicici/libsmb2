@@ -238,7 +238,7 @@ call_cb(struct dcerpc_context *dce _U_, int status, void *data,
         void *cb_data _U_)
 {
         cb_status = status;
-        cb_done = 1;
+        cb_done++;
         if (data) {
                 dcerpc_free_data(dce, data);
         }
@@ -502,6 +502,15 @@ test_sealed(void)
 }
 
 static void
+release_rpc_on_error(struct smb2_context *smb2, const char *message _U_)
+{
+        struct session *s = smb2_get_opaque(smb2);
+        smb2_register_error_callback(smb2, NULL);
+        dcerpc_destroy_context(s->dce);
+        s->dce = NULL;
+}
+
+static void
 test_refused(void)
 {
         uint8_t bad[sizeof(rep_l5_hsign)];
@@ -540,8 +549,10 @@ test_refused(void)
         put16(fault + 8, 32);
         put32(fault + 12, 3);
         put32(fault + 24, 0x1c010003);
+        smb2_set_opaque(s.smb2, &s);
+        smb2_register_error_callback(s.smb2, release_rpc_on_error);
         reply(s.smb2, 0, fault, sizeof(fault));
-        CHECK(cb_done && cb_status != 0);
+        CHECK(s.dce == NULL && cb_done == 1 && cb_status == -ECANCELED);
         session_close(&s);
 }
 
