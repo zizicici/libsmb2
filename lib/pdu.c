@@ -720,7 +720,7 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
 }
 
 static int
-queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
+queue_pdu_inner(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
 {
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
@@ -825,7 +825,6 @@ queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
                         smb2_free_pdu(smb2, pdu);
                 }
                 smb2_close_context(smb2);
-                smb2_finish_dispatch(smb2);
                 return 0;
         }
 
@@ -843,6 +842,21 @@ queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
 
         smb2_add_to_outqueue(smb2, pdu);
         return 0;
+}
+
+/* Queueing may complete a request before returning, including a successful
+ * CANCEL on a writable socket. Keep the transport alive for the entire call. */
+static int
+queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
+{
+        int servicing = smb2->servicing;
+        int rc;
+
+        smb2->servicing = 1;
+        rc = queue_pdu_inner(smb2, pdu, report_pending);
+        smb2->servicing = servicing;
+        smb2_finish_dispatch(smb2);
+        return rc;
 }
 
 /* Library operations complete once. Raw passthrough clients can also

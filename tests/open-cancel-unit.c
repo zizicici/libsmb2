@@ -429,6 +429,24 @@ static void release_with_queued_truncate(void)
         close(pair[1]);
 }
 
+static void release_from_cancel(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct callbacks echo = {0};
+        struct smb2_pdu *cancel;
+        int pair[2], released = 0;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        assert(!smb2_echo_async(smb2, completed, &echo));
+        cancel = smb2_cmd_cancel_async(smb2, smb2->waitqueue->header.message_id,
+                                       release_context, &released);
+        assert(cancel && !smb2_queue_pdu_checked(smb2, cancel));
+        assert(released == 1 && echo.completed == 1);
+        close(pair[1]);
+}
+
 static void partial_send_timeout(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -489,6 +507,7 @@ int main(void)
         smb2_destroy_context(smb2);
         close(pair[1]);
         partial_send_timeout();
+        release_from_cancel();
         release_with_queued_truncate();
         release_from_completion(0);
         release_from_completion(1);
