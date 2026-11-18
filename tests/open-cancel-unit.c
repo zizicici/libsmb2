@@ -142,6 +142,34 @@ static void cancel_symlink_retry(struct smb2_context *smb2, int sent)
         assert(smb2->fhs == NULL);
 }
 
+static void cancel_other_open(struct smb2_context *smb2, int status, void *data, void *priv)
+{
+        struct smb2_pdu **other = priv;
+        assert(status < 0);
+        smb2_free_pdu(smb2, *other);
+        *other = NULL;
+}
+
+static void timeout_batch(struct smb2_context *smb2)
+{
+        struct callbacks calls = {0};
+        struct smb2_pdu *first, *other, *last;
+
+        smb2->credits = 0;
+        smb2_set_timeout(smb2, 10);
+        first = smb2_open_async_pdu(smb2, "first", O_RDONLY, cancel_other_open, &other, NULL);
+        other = smb2_open_async_pdu(smb2, "second", O_RDONLY, completed, &calls, released);
+        last = smb2_open_async_pdu(smb2, "last", O_RDONLY, completed, &calls, NULL);
+        assert(first && other && last);
+        first->timeout = last->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == 0);
+        assert(!other && calls.released == 1 && calls.completed == 1);
+        smb2_free_pdu(smb2, first);
+        smb2_free_pdu(smb2, last);
+        smb2_set_timeout(smb2, 0);
+        smb2->credits = 32;
+}
+
 static void disconnect_during_copy(struct smb2_context *smb2, int peer)
 {
         struct smb2_srv_copychunk_resume_key key = {0};
@@ -187,6 +215,7 @@ int main(void)
         assert(owner);
         reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND, NULL);
         assert(owner == NULL && smb2->fhs == NULL);
+        timeout_batch(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);

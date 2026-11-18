@@ -1302,12 +1302,11 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
 
 void smb2_timeout_pdus(struct smb2_context *smb2)
 {
-        struct smb2_pdu *pdu, *next;
+        struct smb2_pdu *pdu;
         time_t t = time(NULL);
 
         pdu = smb2->outqueue;
         while (pdu) {
-                next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         struct smb2_pdu *p;
 
@@ -1329,8 +1328,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
+                        /* Completion callbacks may remove other queued PDUs. */
+                        pdu = smb2->outqueue;
+                } else {
+                        pdu = pdu->next;
                 }
-                pdu = next;
         }
 
         /*
@@ -1340,7 +1342,6 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
          */
         pdu = smb2->waitqueue;
         while (pdu) {
-                next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         if (pdu->cb) {
@@ -1350,8 +1351,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
+                        /* Completion callbacks may remove other queued PDUs. */
+                        pdu = smb2->waitqueue;
+                } else {
+                        pdu = pdu->next;
                 }
-                pdu = next;
         }
 }
 
