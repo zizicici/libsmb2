@@ -1611,8 +1611,8 @@ service_fd(struct smb2_context *smb2, t_socket fd, int revents)
         }
 
   out:
-        if (smb2->timeout) {
-                smb2_timeout_pdus(smb2);
+        if (smb2->timeout && smb2_timeout_pdus(smb2) < 0) {
+                return -ETIMEDOUT;
         }
         return ret;
 }

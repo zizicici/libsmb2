@@ -341,6 +341,27 @@ static void disconnect_during_copy(struct smb2_context *smb2, int peer)
         /* Context teardown below completes the outstanding IOCTL callbacks. */
 }
 
+static void partial_send_timeout(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct callbacks calls = {0};
+        int pair[2];
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 0;
+        smb2_set_timeout(smb2, 5);
+        assert(!smb2_echo_async(smb2, completed, &calls));
+        assert(smb2->outqueue);
+        smb2->outqueue->out.num_done = 1;
+        smb2->outqueue->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == -ETIMEDOUT);
+        assert(!SMB2_VALID_SOCKET(smb2_get_fd(smb2)));
+        smb2_destroy_context(smb2);
+        assert(calls.completed == 1);
+        close(pair[1]);
+}
+
 int main(void)
 {
         int pair[2];
@@ -377,5 +398,6 @@ int main(void)
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);
+        partial_send_timeout();
         return 0;
 }

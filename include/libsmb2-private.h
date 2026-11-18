@@ -840,7 +840,7 @@ int smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
 
 int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
-void smb2_timeout_pdus(struct smb2_context *smb2);
+int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */
 void free_c_data(struct smb2_context*, struct connect_data*);  /* defined in libsmb2.c */

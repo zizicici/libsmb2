@@ -108,9 +108,12 @@ static int wait_for_reply(struct smb2_context *smb2,
 			pfd.revents = 0;
 		}
                 if (smb2->timeout) {
-                        smb2_timeout_pdus(smb2);
+                        int rc = smb2_timeout_pdus(smb2);
                         if (cb_data->is_finished) {
                                 break;
+                        }
+                        if (rc < 0) {
+                                return rc;
                         }
                 }
 		if (!SMB2_VALID_SOCKET(smb2->fd) && ((time(NULL) - t) > (smb2->timeout)))

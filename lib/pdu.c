@@ -1300,7 +1300,7 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 }
 
-void smb2_timeout_pdus(struct smb2_context *smb2)
+int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
         time_t t = time(NULL);
@@ -1313,6 +1313,14 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 if (pdu->timeout && pdu->timeout < t) {
                         struct smb2_pdu *p;
 
+                        if (pdu->out.num_done) {
+                                /* A following frame would be read as the missing tail.
+                                 * The failed service call hands cleanup to the caller. */
+                                smb2_set_error(smb2, "Timed out sending a partial SMB frame");
+                                smb2_close_context(smb2);
+                                smb2->servicing = servicing;
+                                return -ETIMEDOUT;
+                        }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         /*
                          * An unsent compound is still chained: like
@@ -1361,5 +1369,6 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 }
         }
         smb2->servicing = servicing;
+        return 0;
 }
 
