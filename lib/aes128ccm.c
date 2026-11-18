@@ -80,13 +80,26 @@ static void ccm_generate_T(unsigned char *key,
 
         /* Create Aad */
         if (alen) {
-                /* First block */
+                /* First block. RFC 3610 2.2: the two-byte length field
+                 * carries the AAD length up to 65,279; from 65,280 on it
+                 * escapes to 0xfffe and the real length follows as BE32,
+                 * leaving 10 AAD bytes in the first block instead of 14. */
                 memset(b, 0, 16);
-                l = htobe16((uint16_t)alen);
-                memcpy(b, &l, 2);
+                if (alen >= 0xff00) {
+                        uint16_t esc = htobe16(0xfffe);
+                        uint32_t l32 = htobe32((uint32_t)alen);
 
-                l = (alen > 14) ? 14 : (uint16_t)alen;
-                memcpy(&b[2], aad, l);
+                        memcpy(b, &esc, 2);
+                        memcpy(&b[2], &l32, 4);
+                        l = (alen > 10) ? 10 : (uint16_t)alen;
+                        memcpy(&b[6], aad, l);
+                } else {
+                        l = htobe16((uint16_t)alen);
+                        memcpy(b, &l, 2);
+
+                        l = (alen > 14) ? 14 : (uint16_t)alen;
+                        memcpy(&b[2], aad, l);
+                }
                 aad  += l;
                 alen -= l;
 
