@@ -346,6 +346,9 @@ static void close_after_positioned_io(struct smb2_context *smb2)
         assert(!smb2_select_tree_id(smb2, 1));
         fh = smb2_fh_from_file_id(smb2, &id);
         assert(fh);
+        assert(smb2_pwrite_async(smb2, fh, NULL, 1, 0, completed, &calls) == -EINVAL);
+        assert(smb2_pread_async(smb2, fh, NULL, 1, 0, completed, &calls) == -EINVAL);
+        assert(!smb2->waitqueue && !smb2->outqueue && calls.completed == 0);
         assert(!smb2_pwrite_async(smb2, fh, &byte, 1, 0, completed, &calls));
         assert(!smb2_pread_async(smb2, fh, &byte, 1, 0, completed, &calls));
         assert(!smb2_close_async(smb2, fh, completed, &calls));

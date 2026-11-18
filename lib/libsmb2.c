@@ -2414,7 +2414,7 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
         struct file_io *io;
         int rc;
 
-        if (smb2 == NULL || (!position && count && buf == NULL)) {
+        if (smb2 == NULL) {
                 return -EINVAL;
         }
         if (fh == NULL) {
@@ -2425,6 +2425,12 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
         }
         if (fh->closing) {
                 return -EBADF;
+        }
+        if (count && !buf) {
+                if (position) {
+                        smb2_set_error(smb2, "Missing buffer for file I/O");
+                }
+                return -EINVAL;
         }
         io = calloc(1, sizeof(*io));
         if (io == NULL) {
