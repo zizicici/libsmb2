@@ -371,6 +371,16 @@ smb2_random_bytes(void *buf, size_t len)
                                 if (errno == EINTR) {
                                         continue;
                                 }
+                                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                        /* The CRNG is not seeded yet (early
+                                         * boot). Fail rather than degrade to
+                                         * an unseeded /dev/urandom: callers
+                                         * use this for challenges and
+                                         * encryption nonces and should
+                                         * retry later. */
+                                        errno = EAGAIN;
+                                        return -1;
+                                }
                                 break;
                         }
                         done += (size_t)count;
