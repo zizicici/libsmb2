@@ -4069,6 +4069,9 @@ smb2_open_cb(struct smb2_context *smb2, int status,
                 smb2_set_error(smb2, "Failed to open pipe %s: %s",
                                dce->path, nterror_to_str(status));
                 status = -nterror_to_errno(status);
+                if (!status) {
+                        status = -EIO; /* EOF is only a successful result for a read. */
+                }
         } else {
                 memcpy(dce->file_id, rep->file_id, SMB2_FD_SIZE);
                 status = dcerpc_bind_async(dce, data);

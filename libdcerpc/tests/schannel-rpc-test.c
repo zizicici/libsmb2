@@ -397,6 +397,21 @@ test_open_without_transport(void)
 }
 
 static void
+test_open_eof(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct dcerpc_context *dce = dcerpc_create_context(smb2);
+
+        CHECK(smb2 && dce);
+        cb_done = 0;
+        CHECK(dcerpc_connect_context_async(dce, "netlogon", &netlogon_syntax, call_cb, NULL) == 0);
+        last_cb(smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+        dcerpc_destroy_context(dce);
+        CHECK(cb_done == 1 && cb_status == -EIO);
+        smb2_destroy_context(smb2);
+}
+
+static void
 test_bind(void)
 {
         /* auth type 68, level 5, no pad, context id 1, then the
@@ -570,6 +585,7 @@ int
 main(void)
 {
         test_open_without_transport();
+        test_open_eof();
         test_bind();
 #ifdef SMB2_HAVE_IS_DISPATCHING
         test_sync_wait();
