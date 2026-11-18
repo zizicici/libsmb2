@@ -4140,8 +4140,9 @@ dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb, void *cb_data)
 {
         int rc;
 
-        if (dce->destroying) {
-                return -ECANCELED;
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                return rc;
         }
         dce->active++;
         rc = dcerpc_submit_open(dce, cb, cb_data);

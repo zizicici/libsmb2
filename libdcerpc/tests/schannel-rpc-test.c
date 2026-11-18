@@ -387,6 +387,16 @@ test_sync_wait(void)
 #endif
 
 static void
+test_open_without_transport(void)
+{
+        struct dcerpc_context *dce = dcerpc_create_context(NULL);
+
+        CHECK(dce != NULL);
+        CHECK(dcerpc_open_async(dce, call_cb, NULL) == -EINVAL);
+        dcerpc_destroy_context(dce);
+}
+
+static void
 test_bind(void)
 {
         /* auth type 68, level 5, no pad, context id 1, then the
@@ -559,6 +569,7 @@ test_refused(void)
 int
 main(void)
 {
+        test_open_without_transport();
         test_bind();
 #ifdef SMB2_HAVE_IS_DISPATCHING
         test_sync_wait();
