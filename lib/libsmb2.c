@@ -2547,9 +2547,13 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
          * unlink() removes a symlink instead of what it points at, the
          * way posix unlink() does. This is ignored for files that are not
          * reparse points.
+         * rmdir() adds SMB2_FILE_DIRECTORY_FILE so the server rejects a
+         * plain file outright; without it Samba happily DELETE_ON_CLOSEs
+         * one, and rmdir() deletes arbitrary files.
          */
         cr_req.create_options = SMB2_FILE_DELETE_ON_CLOSE |
-                SMB2_FILE_OPEN_REPARSE_POINT;
+                SMB2_FILE_OPEN_REPARSE_POINT |
+                (is_dir ? SMB2_FILE_DIRECTORY_FILE : 0);
         cr_req.name = path;
 
         pdu = smb2_cmd_create_async(smb2, &cr_req, create_cb_1, create_data);
