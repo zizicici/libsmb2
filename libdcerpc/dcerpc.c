@@ -214,7 +214,6 @@ struct dcerpc_pending {
 #ifdef HAVE_LIBSMB2
         struct dcerpc_context *dce;
         smb2_command_cb stage;
-        void *stage_data;
 #endif
         dcerpc_cb cb;
         void *cb_data;
@@ -553,7 +552,7 @@ dcerpc_check_coders(struct smb2_context *smb2)
 }
 
 struct dcerpc_pdu {
-        struct dcerpc_pending pending;
+        struct dcerpc_pending pending; /* First so transport callbacks can recover the PDU. */
         struct dcerpc_header hdr;
 
         union {
@@ -589,6 +588,7 @@ struct dcerpc_pdu {
         size_t frag_pos;
 
         /* Multi-fragment response reassembly (named-pipe / IOCTL) */
+        uint8_t *frag_read_buf;
         uint8_t *reasm_buf;
         size_t reasm_len;
         size_t reasm_cap;
@@ -1309,17 +1309,16 @@ dcerpc_dispatch(struct smb2_context *smb2, int status, void *reply, void *privat
         if (dce) {
                 dce->active++;
         }
-        p->stage(smb2, status, reply, p->stage_data);
+        p->stage(smb2, status, reply, p);
         if (dce) {
                 dcerpc_leave(dce);
         }
 }
 
 static struct dcerpc_pending *
-dcerpc_stage(struct dcerpc_pending *p, smb2_command_cb stage, void *data)
+dcerpc_stage(struct dcerpc_pending *p, smb2_command_cb stage)
 {
         p->stage = stage;
-        p->stage_data = data;
         return p;
 }
 #endif
@@ -1435,6 +1434,7 @@ dcerpc_free_pdu(struct dcerpc_context *dce _U_, struct dcerpc_pdu *pdu)
 
         dcerpc_mem_free(pdu->payload);
         free(pdu->frag_buf);
+        free(pdu->frag_read_buf);
         free(pdu->reasm_buf);
         free(pdu->ptrs);
         free(pdu);
@@ -2826,11 +2826,6 @@ dcerpc_reasm_append(struct dcerpc_pdu *pdu, const uint8_t *data, size_t len)
         return 0;
 }
 
-struct dcerpc_frag_read {
-        struct dcerpc_pdu *pdu;
-        uint8_t *buf;
-};
-
 static void dcerpc_send_pdu_cb_and_free(struct dcerpc_context *dce,
                                         struct dcerpc_pdu *pdu,
                                         int status, void *command_data);
@@ -2842,15 +2837,12 @@ static void
 dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                     void *command_data, void *private_data)
 {
-        struct dcerpc_frag_read *fr = private_data;
-        struct dcerpc_pdu *pdu = fr->pdu;
+        struct dcerpc_pdu *pdu = private_data;
         struct dcerpc_context *dce = pdu->dce;
         struct smb2_read_reply *rep = command_data;
         uint32_t nread = 0;
 
         if (pdu->pending.orphaned) {
-                free(fr->buf);
-                free(fr);
                 dcerpc_free_pdu(NULL, pdu);
                 return;
         }
@@ -2862,8 +2854,6 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_error(smb2, "DCERPC fragment READ failed "
                                "(0x%08x) %s", status, nterror_to_str(status));
-                free(fr->buf);
-                free(fr);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status),
                                            NULL);
                 return;
@@ -2872,35 +2862,25 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
         if (rep) {
                 nread = rep->data_length;
         }
-        /* fr->buf holds no more than was asked for */
         if (nread > DCE_FRAG_READ_SIZE) {
                 smb2_set_error(smb2, "DCERPC fragment READ returned %u "
                                "bytes, more than the %d asked for", nread,
                                DCE_FRAG_READ_SIZE);
-                free(fr->buf);
-                free(fr);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
                 return;
         }
         if (nread == 0) {
                 smb2_set_error(smb2, "DCERPC fragment READ returned 0 bytes "
                                "before LAST_FRAG");
-                free(fr->buf);
-                free(fr);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
                 return;
         }
 
-        if (dcerpc_reasm_append(pdu, fr->buf, nread)) {
+        if (dcerpc_reasm_append(pdu, pdu->frag_read_buf, nread)) {
                 smb2_set_error(smb2, "DCERPC failed to grow reassembly buffer");
-                free(fr->buf);
-                free(fr);
                 dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
                 return;
         }
-
-        free(fr->buf);
-        free(fr);
 
         dcerpc_finish_call_from_reasm(dce, pdu);
 }
@@ -2908,43 +2888,25 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
 static int
 dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
 {
-        struct dcerpc_frag_read *fr;
-        struct smb2_read_request req;
+        struct smb2_read_request req = {0};
         struct smb2_pdu *smb2_pdu;
-        int rc;
 
-        fr = calloc(1, sizeof(*fr));
-        if (fr == NULL) {
-                return -ENOMEM;
+        if (pdu->frag_read_buf == NULL) {
+                pdu->frag_read_buf = malloc(DCE_FRAG_READ_SIZE);
+                if (pdu->frag_read_buf == NULL) {
+                        return -ENOMEM;
+                }
         }
-        fr->pdu = pdu;
-        fr->buf = malloc(DCE_FRAG_READ_SIZE);
-        if (fr->buf == NULL) {
-                free(fr);
-                return -ENOMEM;
-        }
-
-        memset(&req, 0, sizeof(req));
         req.length = DCE_FRAG_READ_SIZE;
-        req.offset = 0;
-        req.buf = fr->buf;
+        req.buf = pdu->frag_read_buf;
         memcpy(req.file_id, dce->file_id, SMB2_FD_SIZE);
-        req.minimum_count = 0;
-        req.channel = SMB2_CHANNEL_NONE;
 
         smb2_pdu = smb2_cmd_read_async(dce->smb2, &req, dcerpc_dispatch,
-                        dcerpc_stage(&pdu->pending, dcerpc_frag_read_cb, fr));
+                        dcerpc_stage(&pdu->pending, dcerpc_frag_read_cb));
         if (smb2_pdu == NULL) {
-                free(fr->buf);
-                free(fr);
                 return -ENOMEM;
         }
-        rc = smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
-        if (rc < 0) {
-                free(fr->buf);
-                free(fr);
-        }
-        return rc;
+        return smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -3391,7 +3353,7 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 req.input = frag;
                 req.flags = SMB2_0_IOCTL_IS_FSCTL;
                 smb2_pdu = smb2_cmd_ioctl_async(dce->smb2, &req,
-                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_call_cb, pdu));
+                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_call_cb));
         } else {
                 struct smb2_write_request req;
 
@@ -3400,7 +3362,7 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 req.length = flen;
                 req.buf = frag;
                 smb2_pdu = smb2_cmd_write_async(dce->smb2, &req, 0,
-                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_frag_write_cb, pdu));
+                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_frag_write_cb));
         }
         if (smb2_pdu == NULL) {
                 return -ENOMEM;
@@ -4023,7 +3985,7 @@ dcerpc_bind_async(struct dcerpc_context *dce, struct dcerpc_pending *open)
                 return -ECANCELED;
         }
         smb2_pdu = smb2_cmd_ioctl_async(dce->smb2, &req, dcerpc_dispatch,
-                        dcerpc_stage(&pdu->pending, smb2_bind_cb, pdu));
+                        dcerpc_stage(&pdu->pending, smb2_bind_cb));
         if (smb2_pdu == NULL) {
                 dcerpc_free_pdu(dce, pdu);
                 return -ENOMEM;
@@ -4123,7 +4085,7 @@ dcerpc_submit_open(struct dcerpc_context *dce, dcerpc_cb cb,
                 return -ECANCELED;
         }
         pdu = smb2_cmd_create_async(dce->smb2, &req, dcerpc_dispatch,
-                        dcerpc_stage(data, smb2_open_cb, data));
+                        dcerpc_stage(data, smb2_open_cb));
         if (pdu == NULL) {
                 free(data);
                 return -ENOMEM;
