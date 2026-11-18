@@ -4585,15 +4585,16 @@ disconnect_cb_2(struct smb2_context *smb2, int status,
 {
         struct disconnect_data *dc_data = private_data;
 
-        dc_data->cb(smb2, 0, NULL, dc_data->cb_data);
-        free(dc_data);
-        if (smb2->change_fd) {
-                smb2->change_fd(smb2, smb2->fd, SMB2_DEL_FD);
+        if (status == SMB2_STATUS_PENDING) {
+                return;
         }
-        close(smb2->fd);
-        smb2->fd = SMB2_INVALID_SOCKET;
-        smb2_quic_reset(smb2);
-        smb2_rdma_reset(smb2);
+        if (status != SMB2_STATUS_SUCCESS) {
+                smb2_set_nterror(smb2, status, "Logoff failed: %s",
+                                 nterror_to_str(status));
+        }
+        smb2_close_context(smb2);
+        dc_data->cb(smb2, -nterror_to_errno(status), NULL, dc_data->cb_data);
+        free(dc_data);
 }
 
 static void
@@ -4603,9 +4604,13 @@ disconnect_cb_1(struct smb2_context *smb2, int status,
         struct disconnect_data *dc_data = private_data;
         struct smb2_pdu *pdu;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
-                dc_data->cb(smb2, -ENOMEM, NULL, dc_data->cb_data);
+                dc_data->cb(smb2, -nterror_to_errno(status), NULL,
+                            dc_data->cb_data);
                 free(dc_data);
                 return;
         }

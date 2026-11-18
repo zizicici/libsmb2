@@ -120,9 +120,7 @@ static void sync_connect_cb(struct smb2_context *smb2, int status,
         struct sync_cb_data *cb_data = private_data;
 
         if (cb_data->status == SMB2_STATUS_CANCELLED) {
-                if (cb_data != &smb2->connect_cb_data) {
-                        free(cb_data);
-                }
+                free(cb_data);
                 return;
         }
 
@@ -141,7 +139,11 @@ int smb2_connect_share(struct smb2_context *smb2,
         struct sync_cb_data *cb_data;
         int rc = 0;
 
-        cb_data = &smb2->connect_cb_data;
+        cb_data = calloc(1, sizeof(*cb_data));
+        if (cb_data == NULL) {
+                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
+                return -ENOMEM;
+        }
 	rc = smb2_connect_share_async(smb2, server, share, user, sync_connect_cb, cb_data);
         if (rc < 0) {
                 goto out;
@@ -155,7 +157,7 @@ int smb2_connect_share(struct smb2_context *smb2,
 
         rc = cb_data->status;
  out:
-
+        free(cb_data);
 	return rc;
 }
 
@@ -167,7 +169,11 @@ int smb2_disconnect_share(struct smb2_context *smb2)
         struct sync_cb_data *cb_data;
         int rc = 0;
 
-        cb_data = &smb2->connect_cb_data;
+        cb_data = calloc(1, sizeof(*cb_data));
+        if (cb_data == NULL) {
+                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
+                return -ENOMEM;
+        }
 
 	rc = smb2_disconnect_share_async(smb2, sync_connect_cb, cb_data);
         if (rc < 0) {
@@ -182,7 +188,7 @@ int smb2_disconnect_share(struct smb2_context *smb2)
 
         rc = cb_data->status;
  out:
-
+        free(cb_data);
 	return rc;
 }
 
