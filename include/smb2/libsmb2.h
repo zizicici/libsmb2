@@ -1140,7 +1140,8 @@ int smb2_write(struct smb2_context *smb2, struct smb2fh *fh,
  * Sync lseek()
  */
 /*
- * smb2_seek() SEEK_SET and SEEK_CUR are fully supported.
+ * A successful seek sets the position for subsequently submitted operations.
+ * A failed seek preserves the current position.
  * SEEK_END only returns the end-of-file from the original open.
  * (it will not call fstat to discover the current file size and will not block)
  */
