@@ -405,6 +405,30 @@ static void release_from_completion(int sync_open)
         close(pair[1]);
 }
 
+static void release_with_queued_truncate(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct smb2fh *fh;
+        struct callbacks calls = {0};
+        smb2_file_id id = {1};
+        uint8_t wire[512], byte = 1;
+        int pair[2], released = 0;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        smb2_set_timeout(smb2, 5);
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh && !smb2_write_async(smb2, fh, &byte, 1, release_context, &released));
+        assert(read(pair[1], wire, sizeof(wire)) > 0);
+        assert(!smb2_ftruncate_async(smb2, fh, 0, completed, &calls));
+        smb2->waitqueue->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == 0);
+        assert(released == 1 && calls.completed == 1);
+        assert(read(pair[1], wire, sizeof(wire)) == 0);
+        close(pair[1]);
+}
+
 static void partial_send_timeout(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -465,6 +489,7 @@ int main(void)
         smb2_destroy_context(smb2);
         close(pair[1]);
         partial_send_timeout();
+        release_with_queued_truncate();
         release_from_completion(0);
         release_from_completion(1);
         return 0;

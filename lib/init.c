@@ -545,7 +545,7 @@ void smb2_add_active_context(struct smb2_context *smb2)
  * frame and its PDU still belong to the dispatcher until it unwinds. */
 void smb2_finish_dispatch(struct smb2_context *smb2)
 {
-        if (smb2->destroy_pending && !smb2_is_dispatching(smb2) && !smb2->sync_open_wait) {
+        if (smb2->lifetime == SMB2_CONTEXT_CLOSING && !smb2_is_dispatching(smb2) && !smb2->sync_open_wait) {
                 if (smb2->on_active_list) {
                         /* The server loop owns its iterator and culls closed sockets. */
                         smb2_close_context(smb2);
@@ -557,16 +557,16 @@ void smb2_finish_dispatch(struct smb2_context *smb2)
 
 void smb2_destroy_context(struct smb2_context *smb2)
 {
-        if (smb2 == NULL || smb2->destroying) {
+        if (smb2 == NULL || smb2->lifetime == SMB2_CONTEXT_DESTROYING) {
                 return;
         }
 
         if (smb2_is_dispatching(smb2) || smb2->sync_open_wait) {
-                smb2->destroy_pending = 1;
+                smb2->lifetime = SMB2_CONTEXT_CLOSING;
                 return;
         }
         /* Shutdown completions cannot wait for more network events. */
-        smb2->destroying = 1;
+        smb2->lifetime = SMB2_CONTEXT_DESTROYING;
         smb2->servicing = 1;
         smb2_close_connecting_fds(smb2);
 

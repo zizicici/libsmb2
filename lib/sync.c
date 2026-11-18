@@ -95,7 +95,7 @@ static int wait_for_reply(struct smb2_context *smb2,
         while (!cb_data->is_finished) {
                 struct pollfd pfd;
 
-                if (smb2->destroy_pending) {
+                if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
                         return -ECANCELED;
                 }
 		memset(&pfd, 0, sizeof(struct pollfd));
@@ -242,7 +242,7 @@ finish_sync_open(struct smb2_context *smb2, struct smb2_pdu *pdu,
                 wait_for_reply(smb2, cb_data);
                 smb2_free_pdu(smb2, pdu);
         }
-        if (smb2->destroy_pending) {
+        if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
                 cb_data->ptr = NULL;
         }
         smb2->sync_open_wait--;

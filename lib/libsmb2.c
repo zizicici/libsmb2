@@ -2543,7 +2543,7 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
 
         /* A shutdown completes the accepted queue locally. Its callers may
          * already have returned from a failed synchronous transport wait. */
-        if (smb2->destroying || smb2->in_queue_abort) {
+        if (smb2->lifetime != SMB2_CONTEXT_LIVE || smb2->in_queue_abort) {
                 return -EIO;
         }
         switch (io->command) {

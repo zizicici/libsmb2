@@ -725,6 +725,13 @@ queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
 
+        if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
+                /* The shutdown sweep completes accepted requests without encoding
+                 * borrowed buffers or sending another operation on the wire. */
+                SMB2_LIST_ADD_END(&smb2->outqueue, pdu);
+                return 0;
+        }
+
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
                 p->report_pending = report_pending;

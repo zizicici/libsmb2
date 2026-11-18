@@ -283,7 +283,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 smb2_set_error(smb2, "trying to write but not connected");
                 return -1;
         }
-        while ((pdu = smb2->outqueue) != NULL) {
+        while (smb2->lifetime == SMB2_CONTEXT_LIVE && (pdu = smb2->outqueue) != NULL) {
                 struct iovec iov[SMB2_MAX_VECTORS] _U_;
                 struct iovec *tmpiov;
                 struct smb2_pdu *tmp_pdu;
@@ -1245,6 +1245,9 @@ smb2_read_from_socket(struct smb2_context *smb2)
         int count;
 
         while(1) {
+                if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
+                        return 0;
+                }
                 /* A callback closed the connection: whoever did set the
                  * error, do not replace it with that of a read on a closed
                  * socket.
@@ -1573,7 +1576,7 @@ service_fd(struct smb2_context *smb2, t_socket fd, int revents)
         }
 
   out:
-        if (smb2->timeout && smb2_timeout_pdus(smb2) < 0) {
+        if (smb2->lifetime == SMB2_CONTEXT_LIVE && smb2->timeout && smb2_timeout_pdus(smb2) < 0) {
                 return -ETIMEDOUT;
         }
         return ret;

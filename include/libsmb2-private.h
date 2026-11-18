@@ -162,8 +162,11 @@ struct sync_cb_data {
 
 struct smb2_context {
         int servicing;
-        int destroying;
-        int destroy_pending;
+        enum {
+                SMB2_CONTEXT_LIVE,
+                SMB2_CONTEXT_CLOSING,
+                SMB2_CONTEXT_DESTROYING
+        } lifetime;
         int sync_open_wait; /* holds a caller-owned CREATE until wait cleanup */
 
         t_socket fd;
