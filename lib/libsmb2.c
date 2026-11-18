@@ -1705,15 +1705,11 @@ open_flags_to_create_request(struct smb2_create_request *req,
 
 #ifdef O_DIRECTORY
         if (flags & O_DIRECTORY) {
-                /* must be directory */
-                create_options |= SMB2_FILE_DIRECTORY_FILE;
-        } else {
-                /* must not be directory */
-                create_options |= SMB2_FILE_NON_DIRECTORY_FILE;
+                flags |= SMB2_O_DIRECTORY;
         }
-#else
-        create_options |= SMB2_FILE_NON_DIRECTORY_FILE;
 #endif
+        create_options |= (flags & SMB2_O_DIRECTORY) ?
+                SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
 
         if (flags & O_SYNC) {
                 desired_access |= SMB2_SYNCHRONIZE;
@@ -5348,11 +5344,7 @@ int smb2_notify_change_async(struct smb2_context *smb2, const char *path, uint16
                        smb2_command_cb cb, void *cb_data)
 {
         struct smb2fh *fh;
-#ifdef O_DIRECTORY
-        fh = smb2_open(smb2, path, O_DIRECTORY);
-#else
-        fh = smb2_open(smb2, path, 0);
-#endif
+        fh = smb2_open(smb2, path, SMB2_O_DIRECTORY);
         if (fh == NULL) {
                 smb2_set_error(smb2, "smb2_open failed. %s\n", smb2_get_error(smb2));
                 return -1;
