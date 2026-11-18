@@ -873,6 +873,7 @@ static void sync_copy_ioctl_cb(struct smb2_context *smb2, int status,
         struct sync_cb_data *cb_data = private_data;
 
         if (cb_data->status == SMB2_STATUS_CANCELLED) {
+                smb2_free_data(smb2, command_data);
                 free(cb_data);
                 return;
         }
@@ -903,12 +904,12 @@ int smb2_request_resume_key(struct smb2_context *smb2, struct smb2fh *fh,
         rc = wait_for_reply(smb2, cb_data);
         if (rc < 0) {
                 cb_data->status = SMB2_STATUS_CANCELLED;
-                goto out;
+                return rc;
         }
 
         rc = cb_data->status;
-        if (rc == 0 && cb_data->ptr != NULL) {
-                if (resume_key != NULL) {
+        if (cb_data->ptr != NULL) {
+                if (rc == 0 && resume_key != NULL) {
                         memcpy(resume_key, cb_data->ptr, sizeof(*resume_key));
                 }
                 smb2_free_data(smb2, cb_data->ptr);
@@ -946,7 +947,7 @@ int smb2_copychunk(struct smb2_context *smb2,
         rc = wait_for_reply(smb2, cb_data);
         if (rc < 0) {
                 cb_data->status = SMB2_STATUS_CANCELLED;
-                goto out;
+                return rc;
         }
 
         rc = cb_data->status;
@@ -989,7 +990,7 @@ int smb2_server_side_copy(struct smb2_context *smb2,
         rc = wait_for_reply(smb2, cb_data);
         if (rc < 0) {
                 cb_data->status = SMB2_STATUS_CANCELLED;
-                goto out;
+                return rc;
         }
 
         rc = cb_data->status;

@@ -4256,6 +4256,9 @@ smb2_ioctl_output_cb(struct smb2_context *smb2, int status,
         struct smb2_ioctl_cb_data *ioctl_data = private_data;
         void *output = NULL;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
         }
@@ -4341,7 +4344,7 @@ static int
 smb2_copychunk_submit_async(struct smb2_context *smb2,
                             uint32_t ctl_code,
                             const struct smb2_srv_copychunk_resume_key *resume_key,
-                            struct smb2fh *dstfh,
+                            const uint8_t *dst_file_id,
                             const struct smb2_srv_copychunk *chunks,
                             uint32_t chunk_count,
                             smb2_command_cb cb, void *cb_data)
@@ -4355,7 +4358,7 @@ smb2_copychunk_submit_async(struct smb2_context *smb2,
         if (smb2 == NULL) {
                 return -EINVAL;
         }
-        if (dstfh == NULL) {
+        if (dst_file_id == NULL) {
                 smb2_set_error(smb2, "Destination file handle was NULL");
                 return -EINVAL;
         }
@@ -4385,7 +4388,7 @@ smb2_copychunk_submit_async(struct smb2_context *smb2,
 
         memset(&req, 0, sizeof(req));
         req.ctl_code = ctl_code;
-        memcpy(req.file_id, dstfh->file_id, SMB2_FD_SIZE);
+        memcpy(req.file_id, dst_file_id, SMB2_FD_SIZE);
         req.input_count = input_count;
         req.input = ioctl_data->input;
         req.flags = SMB2_0_IOCTL_IS_FSCTL;
@@ -4462,14 +4465,15 @@ smb2_copychunk_async(struct smb2_context *smb2,
                      uint32_t chunk_count,
                      smb2_command_cb cb, void *cb_data)
 {
-        return smb2_copychunk_submit_async(smb2, ctl_code, resume_key, dstfh,
+        return smb2_copychunk_submit_async(smb2, ctl_code, resume_key,
+                                           dstfh ? dstfh->file_id : NULL,
                                            chunks, chunk_count, cb, cb_data);
 }
 
 struct smb2_server_side_copy_data {
         smb2_command_cb cb;
         void *cb_data;
-        struct smb2fh *dstfh;
+        smb2_file_id dst_file_id;
         uint32_t ctl_code;
         uint32_t chunk_count;
         struct smb2_srv_copychunk *chunks;
@@ -4483,6 +4487,7 @@ smb2_server_side_copy_resume_key_cb(struct smb2_context *smb2, int status,
         int ret;
 
         if (status != 0) {
+                smb2_free_data(smb2, command_data);
                 copy_data->cb(smb2, status, NULL, copy_data->cb_data);
                 free(copy_data->chunks);
                 free(copy_data);
@@ -4490,7 +4495,7 @@ smb2_server_side_copy_resume_key_cb(struct smb2_context *smb2, int status,
         }
 
         ret = smb2_copychunk_submit_async(smb2, copy_data->ctl_code,
-                                          command_data, copy_data->dstfh,
+                                          command_data, copy_data->dst_file_id,
                                           copy_data->chunks,
                                           copy_data->chunk_count,
                                           copy_data->cb,
@@ -4554,7 +4559,7 @@ smb2_server_side_copy_async(struct smb2_context *smb2,
                chunk_count * sizeof(struct smb2_srv_copychunk));
         copy_data->cb = cb;
         copy_data->cb_data = cb_data;
-        copy_data->dstfh = dstfh;
+        memcpy(copy_data->dst_file_id, dstfh->file_id, SMB2_FD_SIZE);
         copy_data->ctl_code = ctl_code;
         copy_data->chunk_count = chunk_count;
 

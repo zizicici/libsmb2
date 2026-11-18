@@ -128,6 +128,25 @@ static void cancel_symlink_retry(struct smb2_context *smb2, int sent)
         assert(smb2->fhs == NULL);
 }
 
+static void disconnect_during_copy(struct smb2_context *smb2, int peer)
+{
+        struct smb2_srv_copychunk_resume_key key = {0};
+        struct smb2_srv_copychunk chunk = {0};
+        struct smb2_srv_copychunk_reply result;
+        smb2_file_id id = {0};
+        struct smb2fh *fh = smb2_fh_from_file_id(smb2, &id);
+
+        assert(fh);
+        chunk.length = 1;
+        assert(shutdown(peer, SHUT_WR) == 0);
+        assert(smb2_request_resume_key(smb2, fh, &key) < 0);
+        assert(smb2_copychunk(smb2, SMB2_FSCTL_SRV_COPYCHUNK, &key,
+                              fh, &chunk, 1, &result) < 0);
+        assert(smb2_server_side_copy(smb2, SMB2_FSCTL_SRV_COPYCHUNK,
+                                     fh, fh, &chunk, 1, &result) < 0);
+        /* Context teardown below completes the outstanding IOCTL callbacks. */
+}
+
 int main(void)
 {
         int pair[2];
@@ -153,6 +172,7 @@ int main(void)
         assert(owner);
         reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND, NULL);
         assert(owner == NULL && smb2->fhs == NULL);
+        disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);
         return 0;
