@@ -18,6 +18,13 @@ echo -n "Verify file content match ... "
 cmp testfile testfile2 || failure
 success
 
+if [ -r /sys/devices/system/cpu/kernel_max ] && command -v timeout >/dev/null 2>&1; then
+    echo -n "Stop at EOF when the source reports a larger size ... "
+    timeout 5 ../utils/smb2-cp /sys/devices/system/cpu/kernel_max testfile2 >/dev/null || failure
+    cmp /sys/devices/system/cpu/kernel_max testfile2 || failure
+    success
+fi
+
 echo -n "Testing cp from a file that does not exist ... "
 ../utils/smb2-cp "${TESTURL}/testfile-not-exist"  testfile2 2>/dev/null && failure
 success

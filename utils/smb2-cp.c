@@ -58,15 +58,26 @@ void usage(void)
 	exit(0);
 }
 
+static int
+close_file(struct file_context *fc)
+{
+	if (fc->smb2fh != NULL) {
+		struct smb2fh *fh = fc->smb2fh;
+		fc->smb2fh = NULL;
+		return smb2_close(fc->smb2, fh);
+	}
+	if (fc->fd != -1) {
+		int fd = fc->fd;
+		fc->fd = -1;
+		return close(fd);
+	}
+	return 0;
+}
+
 static void
 free_file_context(struct file_context *file_context)
 {
-	if (file_context->fd != -1) {
-		close(file_context->fd);
-	}
-	if (file_context->smb2fh != NULL) {
-		smb2_close(file_context->smb2, file_context->smb2fh);
-	}
+	close_file(file_context);
 	if (file_context->smb2 != NULL) {
 		smb2_destroy_context(file_context->smb2);
 	}
@@ -81,60 +92,6 @@ file_error(struct file_context *fc)
 		return smb2_get_error(fc->smb2);
 	}
 	return strerror(errno);
-}
-
-static int
-fstat_file(struct file_context *fc, struct stat *st)
-{
-	if (fc->is_smb2 == 0) {
-		return fstat(fc->fd, st);
-	} else {
-		int res;
-		struct smb2_stat_64 smb2_st;
-		res = smb2_fstat(fc->smb2, fc->smb2fh, &smb2_st);
-		if (res < 0) {
-			return res;
-		}
-		st->st_dev          = 0;
-		st->st_ino          = (ino_t)smb2_st.smb2_ino;
-#ifndef WIN32
-		st->st_mode         = 0;
-		st->st_nlink        = (nlink_t)smb2_st.smb2_nlink;
-		st->st_blksize      = 4096;
-		st->st_blocks       = (smb2_st.smb2_size + 4096 - 1) % 4096;
-#endif
-		st->st_uid          = 0;
-		st->st_gid          = 0;
-		st->st_rdev         = 0;
-		st->st_size         = (off_t)smb2_st.smb2_size;
-		st->st_atime        = smb2_st.smb2_atime;
-		st->st_mtime        = smb2_st.smb2_mtime;
-		st->st_ctime        = smb2_st.smb2_ctime;
-
-		return res;
-	}
-}
-
-static ssize_t
-file_pread(struct file_context *fc, uint8_t *buf, size_t count, off_t off)
-{
-	if (fc->is_smb2 == 0) {
-		lseek(fc->fd, off, SEEK_SET);
-		return read(fc->fd, buf, count);
-	} else {
-		return smb2_pread(fc->smb2, fc->smb2fh, buf, count, off);
-	}
-}
-
-static ssize_t
-file_pwrite(struct file_context *fc, uint8_t *buf, size_t count, off_t off)
-{
-	if (fc->is_smb2 == 0) {
-		lseek(fc->fd, off, SEEK_SET);
-		return write(fc->fd, buf, count);
-	} else {
-		return smb2_pwrite(fc->smb2, fc->smb2fh, buf, count, off);
-	}
 }
 
 static struct file_context *
@@ -208,11 +165,11 @@ static uint8_t buf[BUFSIZE];
 
 int main(int argc, char *argv[])
 {
-	struct stat st;
 	struct file_context *src;
 	struct file_context *dst;
-	off_t off;
+	uint64_t off = 0;
 	ssize_t count;
+	int result = 10;
 	
 #ifdef WIN32
 	if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
@@ -242,43 +199,46 @@ int main(int argc, char *argv[])
 		return 10;
 	}
 
-	if (fstat_file(src, &st) != 0) {
-		fprintf(stderr, "Failed to fstat source file: %s\n",
-			file_error(src));
-		free_file_context(src);
-		free_file_context(dst);
-		return 10;
-	}
+	for (;;) {
+		ssize_t written = 0;
 
-	off = 0;
-	while (off < st.st_size) {
-		count = (size_t)(st.st_size - off);
-		if (count > BUFSIZE) {
-			count = BUFSIZE;
-		}
-		count = file_pread(src, buf, count, off);
+		count = src->is_smb2 ? smb2_pread(src->smb2, src->smb2fh, buf, sizeof(buf), off)
+		                     : read(src->fd, buf, sizeof(buf));
 		if (count < 0) {
-			fprintf(stderr, "Failed to read from source file: %s\n",
-				file_error(src));
-			free_file_context(src);
-			free_file_context(dst);
-			return 10;
+			if (!src->is_smb2 && errno == EINTR) {
+				continue;
+			}
+			fprintf(stderr, "Failed to read source: %s\n", file_error(src));
+			goto out;
 		}
-		count = file_pwrite(dst, buf, count, off);
-		if (count < 0) {
-			fprintf(stderr, "Failed to write to dest file: %s\n",
-				file_error(dst));
-			free_file_context(src);
-			free_file_context(dst);
-			return 10;
+		if (count == 0) {
+			break;
 		}
-
-		off += count;
+		while (written < count) {
+			size_t left = (size_t)(count - written);
+			ssize_t n = dst->is_smb2
+				? smb2_pwrite(dst->smb2, dst->smb2fh, buf + written, left, off)
+				: write(dst->fd, buf + written, left);
+			if (n <= 0) {
+				if (n < 0 && !dst->is_smb2 && errno == EINTR) {
+					continue;
+				}
+				fprintf(stderr, "Failed to write destination: %s\n",
+				        n == 0 ? "no progress" : file_error(dst));
+				goto out;
+			}
+			written += n;
+			off += n;
+		}
 	}
-	printf("copied %d bytes\n", (int)off);
-
+	if (close_file(dst) < 0) {
+		fprintf(stderr, "Failed to close destination: %s\n", file_error(dst));
+		goto out;
+	}
+	printf("copied %" PRIu64 " bytes\n", off);
+	result = 0;
+ out:
 	free_file_context(src);
 	free_file_context(dst);
-
-	return 0;
+	return result;
 }
