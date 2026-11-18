@@ -8,18 +8,69 @@
 #include "smb2.h"
 #include "libsmb2.h"
 
+struct completion {
+        int calls;
+        int status;
+        uint64_t offset;
+};
+
+static void read_done(struct smb2_context *smb2 _U_, int status, void *data, void *priv)
+{
+        struct completion *c = priv;
+        struct smb2_read_cb_data *read = data;
+
+        c->calls++;
+        c->status = status;
+        c->offset = read->offset;
+}
+
+static void write_done(struct smb2_context *smb2 _U_, int status, void *data, void *priv)
+{
+        struct completion *c = priv;
+        struct smb2_write_cb_data *write = data;
+
+        c->calls++;
+        c->status = status;
+        c->offset = write->offset;
+}
+
+static int completed(struct completion *c, int status, uint64_t offset)
+{
+        return c->calls == 1 && c->status == status && c->offset == offset;
+}
+
 static int check_io(struct smb2_context *smb2, const char *path)
 {
+        struct completion w[3] = {0}, r[3] = {0};
+        static const uint8_t first[] = "AAAA", second[] = "BBBB", patch[] = "CC";
+        uint8_t buf[18] = {0};
         struct smb2fh *fh = smb2_open(smb2, path, O_RDWR | O_CREAT | O_TRUNC);
 
+        if (!fh ||
+            smb2_write_async(smb2, fh, first, 4, write_done, &w[0]) ||
+            smb2_write_async(smb2, fh, second, 4, write_done, &w[1]) ||
+            smb2_lseek(smb2, fh, 2, SEEK_SET, NULL) != 2 ||
+            smb2_write_async(smb2, fh, patch, 2, write_done, &w[2]) ||
+            smb2_fsync(smb2, fh) || smb2_close(smb2, fh)) {
+                return -1;
+        }
+        if (!completed(&w[0], 4, 0) || !completed(&w[1], 4, 4) || !completed(&w[2], 2, 2)) {
+                return -1;
+        }
+        fh = smb2_open(smb2, path, O_RDONLY);
         if (!fh || smb2_lseek(smb2, fh, 1, SEEK_SET, NULL) != 1 ||
             smb2_lseek(smb2, fh, -9, SEEK_END, NULL) != -EINVAL ||
             smb2_lseek(smb2, fh, 0, SEEK_CUR, NULL) != 1 ||
-            smb2_lseek(smb2, fh, INT64_MAX, SEEK_CUR, NULL) != -EINVAL ||
-            smb2_lseek(smb2, fh, 0, SEEK_CUR, NULL) != 1) {
+            smb2_lseek(smb2, fh, INT64_MAX, SEEK_END, NULL) != -EINVAL ||
+            smb2_lseek(smb2, fh, 0, SEEK_SET, NULL) != 0 ||
+            smb2_read_async(smb2, fh, buf, 6, read_done, &r[0]) ||
+            smb2_read_async(smb2, fh, buf + 6, 6, read_done, &r[1]) ||
+            smb2_read_async(smb2, fh, buf + 12, 6, read_done, &r[2]) ||
+            smb2_close(smb2, fh)) {
                 return -1;
         }
-        return smb2_close(smb2, fh);
+        return completed(&r[0], 6, 0) && completed(&r[1], 2, 6) &&
+               completed(&r[2], 0, 8) && !memcmp(buf, "AACCBBBB", 8) ? 0 : -1;
 }
 
 int main(int argc, char **argv)

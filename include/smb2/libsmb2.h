@@ -1081,6 +1081,8 @@ int smb2_pwrite(struct smb2_context *smb2, struct smb2fh *fh,
  */
 /*
  * Async read()
+ * Reads and writes using the current file position execute in submission
+ * order on each handle. Short transfers advance by the completed byte count.
  *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
@@ -1111,6 +1113,8 @@ int smb2_read(struct smb2_context *smb2, struct smb2fh *fh,
  */
 /*
  * Async write()
+ * Pending sequential reads and writes on this handle complete first.
+ * Use smb2_pwrite_async() to pipeline writes at explicit offsets.
  *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be

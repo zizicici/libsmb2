@@ -175,7 +175,13 @@ struct smb2fh {
         smb2_file_id file_id;
         int64_t offset;
         int64_t end_of_file;
+        uint64_t seek_generation;
         uint32_t open_tree_id;
+
+        struct file_io *io_head, *io_tail;
+        int closing;
+        /* Set while the preceding callback can re-enter this queue. */
+        int *resume_io;
 
         /*
          * Kept so that we can open the target instead if the server tells
@@ -2125,11 +2131,45 @@ smb2_open_async(struct smb2_context *smb2, const char *path, int flags,
         return pdu ? 0 : -1;
 }
 
+/* Operations using the implicit file position must wait for the actual
+ * byte count of the previous operation. A flush or close submitted behind
+ * them must also wait for writes which have not reached the server yet. */
+struct file_io {
+        struct file_io *next;
+        struct smb2fh *fh;
+        enum smb2_command command;
+        uint64_t offset, seek_generation;
+        uint32_t tree_id;
+        smb2_command_cb cb;
+        void *cb_data;
+        union {
+                struct smb2_read_cb_data read;
+                struct smb2_write_cb_data write;
+        } args;
+};
+
+static void file_io_done(struct smb2_context *, int, void *, void *);
+
+static int
+queue_io_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu,
+             smb2_command_cb cb, void *cb_data)
+{
+        if (cb == file_io_done) {
+                struct file_io *io = cb_data;
+                smb2_set_tree_id_for_pdu(smb2, pdu, io->tree_id);
+        }
+        return smb2_queue_pdu_checked(smb2, pdu);
+}
+
 static void
 close_cb(struct smb2_context *smb2, int status,
          void *command_data, void *private_data)
 {
         struct smb2fh *fh = private_data;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
@@ -2143,8 +2183,8 @@ close_cb(struct smb2_context *smb2, int status,
         free_smb2fh(smb2, fh);
 }
 
-int
-smb2_close_async(struct smb2_context *smb2, struct smb2fh *fh,
+static int
+submit_close(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
         struct smb2_close_request req;
@@ -2170,8 +2210,7 @@ smb2_close_async(struct smb2_context *smb2, struct smb2fh *fh,
                 smb2_set_error(smb2, "Failed to create close command");
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
                 return -EIO;
         }
 
@@ -2189,6 +2228,10 @@ fsync_cb(struct smb2_context *smb2, int status,
 {
         struct fsync_data *fsd = private_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Flush failed with (0x%08x) %s",
                                status, nterror_to_str(status));
@@ -2201,8 +2244,8 @@ fsync_cb(struct smb2_context *smb2, int status,
         free(fsd);
 }
 
-int
-smb2_fsync_async(struct smb2_context *smb2, struct smb2fh *fh,
+static int
+submit_fsync(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
         struct smb2_flush_request req;
@@ -2234,8 +2277,7 @@ smb2_fsync_async(struct smb2_context *smb2, struct smb2fh *fh,
                 free(fsd);
                 return -ENOMEM;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
                 free(fsd);
                 return -EIO;
         }
@@ -2257,6 +2299,10 @@ read_cb(struct smb2_context *smb2, int status,
         struct read_data *rd = private_data;
         struct smb2_read_reply *rep = command_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+
         if (status && status != SMB2_STATUS_END_OF_FILE) {
                 smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
                                status, nterror_to_str(status));
@@ -2272,7 +2318,7 @@ read_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
-        if (status == SMB2_STATUS_SUCCESS) {
+        if (rd->cb != file_io_done) {
                 rd->read_cb_data.fh->offset = rd->read_cb_data.offset + rep->data_length;
         }
 
@@ -2359,30 +2405,12 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                 return -EINVAL;
         }
 
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
                 free(rd);
                 return -EIO;
         }
 
         return 0;
-}
-
-int
-smb2_read_async(struct smb2_context *smb2, struct smb2fh *fh,
-                uint8_t *buf, uint32_t count,
-                smb2_command_cb cb, void *cb_data)
-{
-        if (smb2 == NULL) {
-                return -EINVAL;
-        }
-        if (fh == NULL) {
-                smb2_set_error(smb2, "File handle was NULL");
-                return -EINVAL;
-        }
-
-        return smb2_pread_async(smb2, fh, buf, count, fh->offset,
-                                cb, cb_data);
 }
 
 struct write_data {
@@ -2400,6 +2428,10 @@ write_cb(struct smb2_context *smb2, int status,
 {
         struct write_data *wd = private_data;
         struct smb2_write_reply *rep = command_data;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
 
         if (status && status != SMB2_STATUS_END_OF_FILE) {
                 smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
@@ -2429,7 +2461,7 @@ write_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
-        if (status == SMB2_STATUS_SUCCESS) {
+        if (wd->cb != file_io_done) {
                 wd->write_cb_data.fh->offset = wd->write_cb_data.offset + rep->count;
         }
 
@@ -2521,8 +2553,7 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                 free(wr);
                 return -EINVAL;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
                 free(wr);
                 return -EIO;
         }
@@ -2530,20 +2561,173 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         return 0;
 }
 
+static int
+submit_file_io(struct smb2_context *smb2, struct file_io *io)
+{
+        struct smb2fh *fh = io->fh;
+
+        switch (io->command) {
+        case SMB2_READ:
+                io->args.read.offset = io->offset;
+                return smb2_pread_async(smb2, fh, io->args.read.buf,
+                                        io->args.read.count, io->offset,
+                                        file_io_done, io);
+        case SMB2_WRITE:
+                io->args.write.offset = io->offset;
+                return smb2_pwrite_async(smb2, fh, io->args.write.buf,
+                                         io->args.write.count, io->offset,
+                                         file_io_done, io);
+        case SMB2_FLUSH:
+                return submit_fsync(smb2, fh, file_io_done, io);
+        case SMB2_CLOSE:
+                return submit_close(smb2, fh, file_io_done, io);
+        default:
+                return -EINVAL;
+        }
+}
+
+static void
+file_io_done(struct smb2_context *smb2, int status, void *reply, void *private_data)
+{
+        struct file_io *io = private_data;
+        struct smb2fh *fh = io->fh;
+
+        for (;;) {
+                int resume = io->next != NULL;
+
+                if ((io->command == SMB2_READ || io->command == SMB2_WRITE) && status > 0) {
+                        io->offset += (uint32_t)status;
+                        if (io->seek_generation == fh->seek_generation) {
+                                fh->offset = io->offset;
+                        }
+                }
+                fh->io_head = io->next;
+                if (resume) {
+                        if (io->next->seek_generation == io->seek_generation) {
+                                io->next->offset = io->offset;
+                        }
+                        fh->resume_io = &resume;
+                } else {
+                        fh->io_tail = NULL;
+                }
+                io->cb(smb2, status, reply, io->cb_data);
+                free(io);
+                /* A reentrant submission may already have advanced the
+                 * queue, including closing the handle in its callback. */
+                if (!resume) {
+                        return;
+                }
+                fh->resume_io = NULL;
+                io = fh->io_head;
+                status = submit_file_io(smb2, io);
+                if (status == 0) {
+                        return;
+                }
+                /* This call was accepted earlier, so deliver its error. */
+                reply = NULL;
+                if (io->command == SMB2_READ) {
+                        reply = &io->args.read;
+                } else if (io->command == SMB2_WRITE) {
+                        reply = &io->args.write;
+                } else if (io->command == SMB2_CLOSE) {
+                        fh->closing = 0;
+                }
+        }
+}
+
+static int
+queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
+              enum smb2_command command, void *buf, uint32_t count,
+              smb2_command_cb cb, void *cb_data)
+{
+        struct file_io *io;
+        int rc;
+
+        if (smb2 == NULL || fh == NULL || (count && buf == NULL)) {
+                return -EINVAL;
+        }
+        if (fh->closing) {
+                return -EBADF;
+        }
+        if (fh->io_head == NULL && command == SMB2_FLUSH) {
+                return submit_fsync(smb2, fh, cb, cb_data);
+        }
+        io = calloc(1, sizeof(*io));
+        if (io == NULL) {
+                return -ENOMEM;
+        }
+        io->fh = fh;
+        io->command = command;
+        io->offset = fh->offset;
+        io->seek_generation = fh->seek_generation;
+        io->tree_id = smb2_tree_id(smb2);
+        io->cb = cb;
+        io->cb_data = cb_data;
+        if (command == SMB2_WRITE) {
+                io->args.write.fh = fh;
+                io->args.write.buf = buf;
+                io->args.write.count = count;
+        } else if (command == SMB2_READ) {
+                io->args.read.fh = fh;
+                io->args.read.buf = buf;
+                io->args.read.count = count;
+        } else if (command == SMB2_CLOSE) {
+                fh->closing = 1;
+        }
+        if (fh->io_tail) {
+                fh->io_tail->next = io;
+                fh->io_tail = io;
+                if (fh->resume_io) {
+                        /* A callback submitted work while another operation
+                         * was ready. It may wait synchronously for that work. */
+                        *fh->resume_io = 0;
+                        fh->resume_io = NULL;
+                        io = fh->io_head;
+                        rc = submit_file_io(smb2, io);
+                        if (rc < 0) {
+                                void *args = (io->command == SMB2_READ || io->command == SMB2_WRITE)
+                                        ? (void *)&io->args : NULL;
+                                file_io_done(smb2, rc, args, io);
+                        }
+                }
+                return 0;
+        }
+        fh->io_head = fh->io_tail = io;
+        rc = submit_file_io(smb2, io);
+        if (rc < 0) {
+                fh->io_head = fh->io_tail = NULL;
+                fh->closing = 0;
+                free(io);
+        }
+        return rc;
+}
+
+int
+smb2_read_async(struct smb2_context *smb2, struct smb2fh *fh,
+                uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
+{
+        return queue_file_io(smb2, fh, SMB2_READ, buf, count, cb, cb_data);
+}
+
 int
 smb2_write_async(struct smb2_context *smb2, struct smb2fh *fh,
-                 const uint8_t *buf, uint32_t count,
+                 const uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
+{
+        return queue_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, cb, cb_data);
+}
+
+int
+smb2_fsync_async(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
-        if (smb2 == NULL) {
-                return -EINVAL;
-        }
-        if (fh == NULL) {
-                smb2_set_error(smb2, "File handle was NULL");
-                return -EINVAL;
-        }
-        return smb2_pwrite_async(smb2, fh, buf, count, fh->offset,
-                                 cb, cb_data);
+        return queue_file_io(smb2, fh, SMB2_FLUSH, NULL, 0, cb, cb_data);
+}
+
+int
+smb2_close_async(struct smb2_context *smb2, struct smb2fh *fh,
+                 smb2_command_cb cb, void *cb_data)
+{
+        return queue_file_io(smb2, fh, SMB2_CLOSE, NULL, 0, cb, cb_data);
 }
 
 int64_t
@@ -2573,7 +2757,11 @@ smb2_lseek(struct smb2_context *smb2, struct smb2fh *fh,
                 smb2_set_error(smb2, "Lseek offset is outside the supported range");
                 return -EINVAL;
         }
-        fh->offset = base + offset;
+        if (whence != SEEK_CUR || offset != 0) {
+                /* Previously submitted operations keep their original cursor. */
+                fh->seek_generation++;
+                fh->offset = base + offset;
+        }
         if (current_offset) {
                 *current_offset = fh->offset;
         }
