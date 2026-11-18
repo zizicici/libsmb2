@@ -140,6 +140,8 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
         memcpy(iov->buf + 16, req->file_id, SMB2_FD_SIZE);
 
         if (smb2->passthrough) {
+                smb2_set_uint32(iov, 4, req->buffer_length);
+                smb2_set_uint16(iov, 8, req->buffer_offset);
                 if (req->buffer_length) {
                         buf = malloc(PAD_TO_32BIT(req->buffer_length));
                         if (buf == NULL) {
@@ -154,8 +156,6 @@ smb2_encode_set_info_request(struct smb2_context *smb2,
                                 return -1;
                         }
                 }
-                smb2_set_uint32(iov, 4, req->buffer_length);
-                smb2_set_uint16(iov, 8, req->buffer_offset);
                 return 0;
         }
 
