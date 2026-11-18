@@ -2297,6 +2297,7 @@ struct read_data {
         smb2_command_cb cb;
         void *cb_data;
 
+        uint64_t seek_generation;
         struct smb2_read_cb_data read_cb_data;
 };
 
@@ -2326,7 +2327,8 @@ read_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
-        if (rd->cb != file_io_done) {
+        if (rd->cb != file_io_done &&
+            rd->seek_generation == rd->read_cb_data.fh->seek_generation) {
                 rd->read_cb_data.fh->offset = rd->read_cb_data.offset + rep->data_length;
         }
 
@@ -2360,6 +2362,7 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
 
         rd->cb = cb;
         rd->cb_data = cb_data;
+        rd->seek_generation = fh->seek_generation;
         rd->read_cb_data.fh = fh;
         rd->read_cb_data.buf = buf;
         rd->read_cb_data.count = count;
@@ -2425,6 +2428,7 @@ struct write_data {
         smb2_command_cb cb;
         void *cb_data;
 
+        uint64_t seek_generation;
         struct smb2_write_cb_data write_cb_data;
         /* Bytes queued. write_cb_data.count stays the caller's length. */
         uint32_t sent;
@@ -2469,7 +2473,8 @@ write_cb(struct smb2_context *smb2, int status,
                 return;
         }
 
-        if (wd->cb != file_io_done) {
+        if (wd->cb != file_io_done &&
+            wd->seek_generation == wd->write_cb_data.fh->seek_generation) {
                 wd->write_cb_data.fh->offset = wd->write_cb_data.offset + rep->count;
         }
 
@@ -2503,6 +2508,7 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
 
         wr->cb = cb;
         wr->cb_data = cb_data;
+        wr->seek_generation = fh->seek_generation;
         wr->write_cb_data.fh = fh;
         wr->write_cb_data.buf = buf;
         wr->write_cb_data.count = count;

@@ -216,6 +216,32 @@ static void copy_across_tree_switch(struct smb2_context *smb2)
         assert(calls.completed == 1);
 }
 
+static void seek_during_positioned_io(struct smb2_context *smb2)
+{
+        struct smb2_write_reply written = {0};
+        struct smb2_read_reply read = {0};
+        struct callbacks calls = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        uint8_t byte = 0;
+
+        assert(smb2_select_tree_id(smb2, 1) == 0);
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        assert(!smb2_pwrite_async(smb2, fh, &byte, 1, 0, completed, &calls));
+        assert(smb2_lseek(smb2, fh, 7, SEEK_SET, NULL) == 7);
+        written.count = 1;
+        reply(smb2, SMB2_WRITE, 0, &written);
+        assert(smb2_lseek(smb2, fh, 0, SEEK_CUR, NULL) == 7);
+        assert(smb2_select_tree_id(smb2, 1) == 0);
+        assert(!smb2_pread_async(smb2, fh, &byte, 1, 0, completed, &calls));
+        assert(smb2_lseek(smb2, fh, 9, SEEK_SET, NULL) == 9);
+        read.data_length = 1;
+        reply(smb2, SMB2_READ, 0, &read);
+        assert(smb2_lseek(smb2, fh, 0, SEEK_CUR, NULL) == 9);
+        assert(calls.completed == 2);
+}
+
 static void disconnect_during_copy(struct smb2_context *smb2, int peer)
 {
         struct smb2_srv_copychunk_resume_key key = {0};
@@ -264,6 +290,7 @@ int main(void)
         timeout_batch(smb2);
         watch_across_tree_switch(smb2);
         copy_across_tree_switch(smb2);
+        seek_during_positioned_io(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);
