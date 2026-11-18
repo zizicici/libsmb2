@@ -460,6 +460,7 @@ struct smb2dir {
         smb2_command_cb cb;
         void *cb_data;
         smb2_file_id file_id;
+        int server_handle_open;
 
         /*
          * For smb2_opendir_async_pdu(): the pdu the caller owns, until the

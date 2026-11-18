@@ -561,6 +561,9 @@ opendir_complete(struct smb2_context *smb2, struct smb2dir *dir, int status)
         smb2_command_cb cb = dir->cb;
         void *cb_data = dir->cb_data;
 
+        if (status && dir->server_handle_open) {
+                close_abandoned_file(smb2, dir->tree_id, dir->file_id);
+        }
         if (dir->cancel_pdu) {
                 dir->cancel_pdu->free_cb = NULL;
                 dir->cancel_pdu = NULL;
@@ -584,6 +587,7 @@ od_close_cb(struct smb2_context *smb2, int status,
         if (status == SMB2_STATUS_PENDING) {
                 return;
         }
+        dir->server_handle_open = 0;
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
@@ -726,6 +730,7 @@ opendir_created(struct smb2_context *smb2, int status,
         }
 
         memcpy(dir->file_id, rep->file_id, SMB2_FD_SIZE);
+        dir->server_handle_open = 1;
 
         memset(&req, 0, sizeof(struct smb2_query_directory_request));
         req.file_information_class = SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION;

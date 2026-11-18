@@ -94,6 +94,20 @@ static void cancel_directory(struct smb2_context *smb2, enum smb2_command stage)
         assert(smb2->dirs == NULL);
 }
 
+static void directory_query_failure(struct smb2_context *smb2)
+{
+        struct callbacks calls = {0};
+        struct smb2_create_reply created = {0};
+
+        assert(smb2_select_tree_id(smb2, 1) == 0);
+        assert(smb2_opendir_async(smb2, "", completed, &calls) == 0);
+        reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
+        reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_ACCESS_DENIED, NULL);
+        assert(calls.completed == 1 && smb2->dirs == NULL);
+        reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
+        assert(calls.completed == 1);
+}
+
 static void cancel_symlink_retry(struct smb2_context *smb2, int sent)
 {
         struct callbacks calls = {0};
@@ -164,6 +178,7 @@ int main(void)
         cancel_directory(smb2, SMB2_CREATE);
         cancel_directory(smb2, SMB2_QUERY_DIRECTORY);
         cancel_directory(smb2, SMB2_CLOSE);
+        directory_query_failure(smb2);
         cancel_symlink_retry(smb2, 0);
         cancel_symlink_retry(smb2, 1);
         assert(smb2_select_tree_id(smb2, 1) == 0);
