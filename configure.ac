@@ -125,8 +125,23 @@ case $host in
       *mingw32*)
         AC_DEFINE([WIN32_LEAN_AND_MEAN], [1], [Avoid including winsock.h before winsock2.h])
         AC_DEFINE([NEED_GETLOGIN_R], [1], [Provide getlogin_r on Windows])
-        AC_CHECK_LIB([bcrypt], [BCryptGenRandom], [],
-                     [AC_MSG_ERROR([Windows CNG (bcrypt) is required])])
+        dnl  The 32-bit import name includes the stdcall argument size.
+        dnl  Compile against the SDK prototype instead of AC_CHECK_LIB's
+        dnl  argument-less declaration.
+        LIBSOCKET="$LIBSOCKET -lbcrypt"
+        smb2_saved_LIBS=$LIBS
+        LIBS="$LIBSOCKET $LIBS"
+        AC_MSG_CHECKING([for Windows CNG BCryptGenRandom])
+        AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+#include <windows.h>
+#include <bcrypt.h>
+        ]], [[
+          UCHAR byte;
+          return BCryptGenRandom(NULL, &byte, sizeof(byte),
+                                 BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        ]])], [AC_MSG_RESULT([yes])],
+              [AC_MSG_FAILURE([Windows CNG (bcrypt) is required])])
+        LIBS=$smb2_saved_LIBS
         ;;
     esac
     SYS=mingw32
