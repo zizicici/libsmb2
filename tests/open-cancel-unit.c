@@ -281,6 +281,23 @@ static void timeout_during_sync_wait(struct smb2_context *smb2)
         smb2_set_timeout(smb2, 0);
 }
 
+static void flush_after_tree_switch(struct smb2_context *smb2)
+{
+        struct callbacks calls = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh && !smb2_select_tree_id(smb2, 2));
+        assert(!smb2_fsync_async(smb2, fh, completed, &calls));
+        assert(!smb2_close_async(smb2, fh, completed, &calls));
+        assert(smb2->waitqueue && !smb2->waitqueue->next);
+        reply(smb2, SMB2_FLUSH, 0, NULL);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(calls.completed == 2);
+}
+
 static void close_after_positioned_io(struct smb2_context *smb2)
 {
         struct callbacks calls = {0};
@@ -355,6 +372,7 @@ int main(void)
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
+        flush_after_tree_switch(smb2);
         timeout_during_sync_wait(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);

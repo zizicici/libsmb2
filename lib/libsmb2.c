@@ -2694,9 +2694,6 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         if (fh->closing) {
                 return -EBADF;
         }
-        if (fh->io_head == NULL && command == SMB2_FLUSH) {
-                return submit_fsync(smb2, fh, cb, cb_data);
-        }
         io = calloc(1, sizeof(*io));
         if (io == NULL) {
                 return -ENOMEM;
