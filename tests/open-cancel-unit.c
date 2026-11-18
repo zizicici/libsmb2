@@ -474,6 +474,8 @@ int main(void)
         struct smb2_context *smb2 = smb2_init_context();
         struct smb2_pdu *owner;
 
+        assert(smb2_open(NULL, "missing", O_RDONLY) == NULL);
+        assert(smb2_opendir(NULL, "") == NULL);
         assert(smb2);
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) {
                 return 1;

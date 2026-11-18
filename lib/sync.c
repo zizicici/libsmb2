@@ -255,7 +255,7 @@ struct smb2dir *smb2_opendir(struct smb2_context *smb2, const char *path)
         struct sync_cb_data cb_data = {0};
         struct smb2_pdu *pdu;
 
-        if (sync_in_service(smb2)) {
+        if (smb2 == NULL || sync_in_service(smb2)) {
                 return NULL;
         }
         smb2->sync_open_wait++;
@@ -268,7 +268,7 @@ struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
         struct sync_cb_data cb_data = {0};
         struct smb2_pdu *pdu;
 
-        if (sync_in_service(smb2)) {
+        if (smb2 == NULL || sync_in_service(smb2)) {
                 return NULL;
         }
         smb2->sync_open_wait++;
