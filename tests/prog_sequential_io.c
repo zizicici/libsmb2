@@ -34,6 +34,18 @@ static void write_done(struct smb2_context *smb2 _U_, int status, void *data, vo
         c->offset = write->offset;
 }
 
+static void check_nested_wait(struct smb2_context *smb2, int status, void *data, void *priv)
+{
+        struct smb2_write_cb_data *write = data;
+        struct completion *c = priv;
+
+        write_done(smb2, status, data, c);
+        if (smb2_fsync(smb2, write->fh) != -EDEADLK ||
+            smb2_close(smb2, write->fh) != -EDEADLK) {
+                c->status = -1;
+        }
+}
+
 static int completed(struct completion *c, int status, uint64_t offset)
 {
         return c->calls == 1 && c->status == status && c->offset == offset;
@@ -47,7 +59,7 @@ static int check_io(struct smb2_context *smb2, const char *path)
         struct smb2fh *fh = smb2_open(smb2, path, O_RDWR | O_CREAT | O_TRUNC);
 
         if (!fh ||
-            smb2_write_async(smb2, fh, first, 4, write_done, &w[0]) ||
+            smb2_write_async(smb2, fh, first, 4, check_nested_wait, &w[0]) ||
             smb2_write_async(smb2, fh, second, 4, write_done, &w[1]) ||
             smb2_lseek(smb2, fh, 2, SEEK_SET, NULL) != 2 ||
             smb2_write_async(smb2, fh, patch, 2, write_done, &w[2]) ||

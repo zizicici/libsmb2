@@ -161,6 +161,7 @@ struct sync_cb_data {
 };
 
 struct smb2_context {
+        int servicing;
 
         t_socket fd;
 

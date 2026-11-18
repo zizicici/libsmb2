@@ -547,6 +547,8 @@ void smb2_destroy_context(struct smb2_context *smb2)
                 return;
         }
 
+        /* Shutdown completions cannot wait for more network events. */
+        smb2->servicing = 1;
         smb2_close_connecting_fds(smb2);
 
         if (SMB2_VALID_SOCKET(smb2->fd)) {

@@ -1304,6 +1304,9 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
         time_t t = time(NULL);
+        int servicing = smb2->servicing;
+
+        smb2->servicing = 1;
 
         pdu = smb2->outqueue;
         while (pdu) {
@@ -1357,5 +1360,6 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                         pdu = pdu->next;
                 }
         }
+        smb2->servicing = servicing;
 }
 

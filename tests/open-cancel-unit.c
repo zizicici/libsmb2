@@ -243,6 +243,44 @@ static void seek_during_positioned_io(struct smb2_context *smb2)
         assert(calls.completed == 2);
 }
 
+static void count_diagnostic(struct smb2_context *smb2, const char *message)
+{
+        int *count = smb2_get_opaque(smb2);
+        (*count)++;
+}
+
+static void timed_read_done(struct smb2_context *smb2, int status, void *args, void *priv)
+{
+        struct smb2_read_cb_data *rd = args;
+        struct callbacks *calls = priv;
+        int diagnostics = 0;
+        assert(status < 0);
+        smb2_set_opaque(smb2, &diagnostics);
+        smb2_register_error_callback(smb2, count_diagnostic);
+        assert(smb2_close(smb2, rd->fh) == -EDEADLK);
+        assert(!diagnostics);
+        smb2_register_error_callback(smb2, NULL);
+        smb2_set_opaque(smb2, NULL);
+        calls->completed++;
+}
+
+static void timeout_during_sync_wait(struct smb2_context *smb2)
+{
+        struct callbacks calls = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        uint8_t byte;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        smb2_set_timeout(smb2, 1);
+        assert(fh && !smb2_pread_async(smb2, fh, &byte, 1, 0, timed_read_done, &calls));
+        smb2->waitqueue->timeout = time(NULL) - 1;
+        assert(smb2_echo(smb2) < 0);
+        assert(calls.completed == 1 && !smb2->servicing);
+        smb2_set_timeout(smb2, 0);
+}
+
 static void close_after_positioned_io(struct smb2_context *smb2)
 {
         struct callbacks calls = {0};
@@ -317,6 +355,7 @@ int main(void)
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
+        timeout_during_sync_wait(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);

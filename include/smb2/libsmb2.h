@@ -294,6 +294,11 @@ void smb2_fd_event_callbacks(struct smb2_context *smb2,
  * Called to process the events when events become available for the smb2
  * file descriptor.
  *
+ * Event callbacks, including timeout and shutdown completions, can submit
+ * asynchronous work. A blocking SMB call on the same context returns
+ * -EDEADLK (or NULL with errno set to EDEADLK for pointer results).
+ * A recursive service call returns -EDEADLK and leaves the context usable.
+ *
  * Returns:
  *  0 : Success
  * <0 : Unrecoverable failure. At this point the context can no longer be

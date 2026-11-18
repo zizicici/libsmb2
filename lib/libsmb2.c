@@ -182,8 +182,6 @@ struct smb2fh {
         unsigned pending_positioned;
         struct file_io *waiting_close;
         int closing;
-        /* Set while the preceding callback can re-enter this queue. */
-        int *resume_io;
 
         /*
          * Kept so that we can open the target instead if the server tells
@@ -2643,7 +2641,7 @@ file_io_done(struct smb2_context *smb2, int status, void *reply, void *private_d
         struct smb2fh *fh = io->fh;
 
         for (;;) {
-                int resume = io->next != NULL;
+                struct file_io *next = io->next;
 
                 if ((io->command == SMB2_READ || io->command == SMB2_WRITE) && status > 0) {
                         io->offset += (uint32_t)status;
@@ -2651,24 +2649,21 @@ file_io_done(struct smb2_context *smb2, int status, void *reply, void *private_d
                                 fh->offset = io->offset;
                         }
                 }
-                fh->io_head = io->next;
-                if (resume) {
-                        if (io->next->seek_generation == io->seek_generation) {
-                                io->next->offset = io->offset;
+                fh->io_head = next;
+                if (next) {
+                        if (next->seek_generation == io->seek_generation) {
+                                next->offset = io->offset;
                         }
-                        fh->resume_io = &resume;
                 } else {
                         fh->io_tail = NULL;
                 }
                 io->cb(smb2, status, reply, io->cb_data);
                 free(io);
-                /* A reentrant submission may already have advanced the
-                 * queue, including closing the handle in its callback. */
-                if (!resume) {
+                /* With no successor, the callback may have closed the handle. */
+                if (!next) {
                         return;
                 }
-                fh->resume_io = NULL;
-                io = fh->io_head;
+                io = next;
                 status = submit_file_io(smb2, io);
                 if (status == 0) {
                         return;
@@ -2729,19 +2724,6 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         if (fh->io_tail) {
                 fh->io_tail->next = io;
                 fh->io_tail = io;
-                if (fh->resume_io) {
-                        /* A callback submitted work while another operation
-                         * was ready. It may wait synchronously for that work. */
-                        *fh->resume_io = 0;
-                        fh->resume_io = NULL;
-                        io = fh->io_head;
-                        rc = submit_file_io(smb2, io);
-                        if (rc < 0) {
-                                void *args = (io->command == SMB2_READ || io->command == SMB2_WRITE)
-                                        ? (void *)&io->args : NULL;
-                                file_io_done(smb2, rc, args, io);
-                        }
-                }
                 return 0;
         }
         fh->io_head = fh->io_tail = io;

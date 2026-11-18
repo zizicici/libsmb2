@@ -1360,8 +1360,8 @@ smb2_close_connecting_fd(struct smb2_context *smb2, t_socket fd)
         }
 }
 
-int
-smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
+static int
+service_fd(struct smb2_context *smb2, t_socket fd, int revents)
 {
         int ret = 0;
 
@@ -1615,6 +1615,20 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
                 smb2_timeout_pdus(smb2);
         }
         return ret;
+}
+
+int
+smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
+{
+        int rc;
+
+        if (smb2->servicing || smb2->in_queue_abort) {
+                return -EDEADLK;
+        }
+        smb2->servicing = 1;
+        rc = service_fd(smb2, fd, revents);
+        smb2->servicing = 0;
+        return rc;
 }
 
 int
