@@ -2795,6 +2795,9 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
         struct smb2_read_reply *rep = command_data;
         uint32_t nread = 0;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (pdu->pending.orphaned) {
                 free(fr->buf);
                 free(fr);
@@ -3004,6 +3007,9 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         struct dcerpc_context *dce = pdu->dce;
         struct smb2_ioctl_reply *rep = command_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (pdu->pending.orphaned) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
                 dcerpc_free_pdu(NULL, pdu);
@@ -3289,6 +3295,9 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
         struct dcerpc_context *dce = pdu->dce;
         int rc;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (pdu->pending.orphaned) {
                 dcerpc_free_pdu(NULL, pdu);
                 return;
@@ -3669,6 +3678,9 @@ smb2_bind_cb(struct smb2_context *smb2, int status,
         int n_offered;
         int i;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (pdu->pending.orphaned) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
                 dcerpc_free_pdu(NULL, pdu);
@@ -4039,6 +4051,9 @@ smb2_open_cb(struct smb2_context *smb2, int status,
         struct smb2_create_reply *rep = command_data;
         struct dcerpc_context *dce = data->dce;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (data->pending.orphaned) {
                 /* context destroyed while opening: close the pipe again */
                 if (status == SMB2_STATUS_SUCCESS) {

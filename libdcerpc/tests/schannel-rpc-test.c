@@ -309,9 +309,17 @@ session_open(struct session *s, int level, int hsign, int ack_auth)
                                          &netlogon_syntax, call_cb, NULL)) {
                 return -1;
         }
+        last_cb(s->smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        if (cb_done) {
+                return -1;
+        }
         memset(&cr, 0, sizeof(cr));
         cr.file_id[0] = 1;
         last_cb(s->smb2, 0, &cr, last_priv);
+        last_cb(s->smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        if (cb_done) {
+                return -1;
+        }
         reply(s->smb2, 0, b, bind_ack(b, level, hsign, ack_auth));
         return cb_done ? cb_status : -1;
 }
@@ -389,7 +397,11 @@ test_signed(int hsign, const uint8_t *req, size_t req_len,
         CHECK(session_call(&s) == 0);
         CHECK(sent_len == req_len && memcmp(sent, req, req_len) == 0);
         memset(got, 0, sizeof(got));
-        reply(s.smb2, 0, rep, rep_len);
+        last_cb(s.smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        CHECK(!cb_done);
+        if (!cb_done) {
+                reply(s.smb2, 0, rep, rep_len);
+        }
         CHECK(cb_done && cb_status == 0);
         CHECK(rep_stub_ok());
         session_close(&s);
