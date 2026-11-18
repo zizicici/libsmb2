@@ -109,7 +109,18 @@ static void directory_query_failure(struct smb2_context *smb2)
         assert(calls.completed == 1);
 }
 
-static void cancel_symlink_retry(struct smb2_context *smb2, int sent)
+static void cancel_on_error(struct smb2_context *smb2, const char *message)
+{
+        struct smb2_pdu **owner = smb2_get_opaque(smb2);
+
+        smb2_register_error_callback(smb2, NULL);
+        smb2_free_pdu(smb2, *owner);
+        *owner = NULL;
+}
+
+enum cancel_stage { RETRY_QUEUED, RETRY_SENT, LINK_WALK_ERROR };
+
+static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage stage)
 {
         struct callbacks calls = {0};
         struct smb2_pdu *owner;
@@ -126,19 +137,28 @@ static void cancel_symlink_retry(struct smb2_context *smb2, int sent)
         assert(smb2_select_tree_id(smb2, 1) == 0);
         owner = smb2_open_async_pdu(smb2, "link", O_RDONLY, completed, &calls, released);
         assert(owner);
-        if (!sent) {
-                smb2->credits = 0;
-        }
-        reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
-        smb2_free_pdu(smb2, owner);
-        assert(calls.released == 1 && calls.completed == 0);
-        if (sent) {
-                reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
-                reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
+        if (stage == LINK_WALK_ERROR) {
+                smb2_set_opaque(smb2, &owner);
+                smb2_register_error_callback(smb2, cancel_on_error);
+                /* A directory entry "x" links back to itself. */
+                while (owner && smb2->credits > 0) {
+                        reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
+                }
+                assert(owner == NULL);
+                smb2_set_opaque(smb2, NULL);
         } else {
-                assert(smb2->outqueue == NULL && smb2->waitqueue == NULL);
-                smb2->credits = 32;
+                if (stage == RETRY_QUEUED) {
+                        smb2->credits = 0;
+                }
+                reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
+                smb2_free_pdu(smb2, owner);
+                if (stage == RETRY_SENT) {
+                        reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
+                        reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
+                }
         }
+        assert(smb2->outqueue == NULL && smb2->waitqueue == NULL);
+        smb2->credits = 32;
         assert(calls.released == 1 && calls.completed == 0);
         assert(smb2->fhs == NULL);
 }
@@ -397,8 +417,9 @@ int main(void)
         cancel_directory(smb2, SMB2_QUERY_DIRECTORY);
         cancel_directory(smb2, SMB2_CLOSE);
         directory_query_failure(smb2);
-        cancel_symlink_retry(smb2, 0);
-        cancel_symlink_retry(smb2, 1);
+        cancel_symlink_retry(smb2, RETRY_QUEUED);
+        cancel_symlink_retry(smb2, RETRY_SENT);
+        cancel_symlink_retry(smb2, LINK_WALK_ERROR);
         assert(smb2_select_tree_id(smb2, 1) == 0);
         owner = smb2_open_async_pdu(smb2, "missing", O_RDONLY,
                                     release_on_completion, &owner, NULL);

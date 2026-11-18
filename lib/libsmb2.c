@@ -565,12 +565,14 @@ opendir_cancelled(void *private_data)
 static void
 opendir_complete(struct smb2_context *smb2, struct smb2dir *dir, int status)
 {
-        smb2_command_cb cb = dir->cb;
-        void *cb_data = dir->cb_data;
+        smb2_command_cb cb;
+        void *cb_data;
 
         if (status && dir->server_handle_open) {
                 close_abandoned_file(smb2, dir->tree_id, dir->file_id);
         }
+        cb = dir->cb;
+        cb_data = dir->cb_data;
         if (dir->cancel_pdu) {
                 dir->cancel_pdu->free_cb = NULL;
                 dir->cancel_pdu = NULL;
@@ -1940,8 +1942,12 @@ open_complete(struct smb2_context *smb2, struct smb2fh *fh, int status)
         }
         fh->cb = NULL;
         fh->cb_data = NULL;
-        cb(smb2, status, status ? NULL : fh, cb_data);
-        if (status) {
+        if (cb) {
+                cb(smb2, status, status ? NULL : fh, cb_data);
+        } else if (!status) {
+                close_abandoned_file(smb2, fh->open_tree_id, fh->file_id);
+        }
+        if (status || !cb) {
                 free_smb2fh(smb2, fh);
         }
 }
@@ -1953,15 +1959,7 @@ open_created(struct smb2_context *smb2, int status,
         struct smb2fh *fh = private_data;
         struct smb2_create_reply *rep = command_data;
 
-        if (fh->cb == NULL) {
-                if (status == SMB2_STATUS_SUCCESS) {
-                        close_abandoned_file(smb2, fh->open_tree_id, rep->file_id);
-                }
-                free_smb2fh(smb2, fh);
-                return;
-        }
-
-        if (status == SMB2_STATUS_STOPPED_ON_SYMLINK && fh->path) {
+        if (status == SMB2_STATUS_STOPPED_ON_SYMLINK && fh->cb && fh->path) {
                 char *target;
 
                 if (fh->symlink_hops >= SMB2_MAX_SYMLINK_HOPS) {
