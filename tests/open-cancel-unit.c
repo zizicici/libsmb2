@@ -170,6 +170,30 @@ static void timeout_batch(struct smb2_context *smb2)
         smb2->credits = 32;
 }
 
+static void notify_done(struct smb2_context *smb2, int status, void *changes, void *data)
+{
+        int *calls = data;
+        (*calls)++;
+        free_smb2_file_notify_change_information(smb2, changes);
+}
+
+static void watch_across_tree_switch(struct smb2_context *smb2)
+{
+        struct smb2_change_notify_reply rep = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        int calls = 0;
+
+        assert(smb2_select_tree_id(smb2, 1) == 0);
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        assert(smb2_notify_change_filehandle_async(smb2, fh, 0,
+                       SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 1, notify_done, &calls) == 0);
+        reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_SUCCESS, &rep);
+        reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, NULL);
+        assert(calls == 2);
+}
+
 static void copy_across_tree_switch(struct smb2_context *smb2)
 {
         struct smb2_srv_copychunk chunk = {0};
@@ -238,6 +262,7 @@ int main(void)
         reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND, NULL);
         assert(owner == NULL && smb2->fhs == NULL);
         timeout_batch(smb2);
+        watch_across_tree_switch(smb2);
         copy_across_tree_switch(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);

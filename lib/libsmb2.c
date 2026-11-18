@@ -2668,7 +2668,7 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         io->command = command;
         io->offset = fh->offset;
         io->seek_generation = fh->seek_generation;
-        io->tree_id = smb2_tree_id(smb2);
+        io->tree_id = file_handle_tree_id(smb2, fh);
         io->cb = cb;
         io->cb_data = cb_data;
         if (command == SMB2_WRITE) {
@@ -5191,6 +5191,7 @@ struct notify_change_cb_data {
         void *cb_data;
         // smb2fh file handle of the directory to get notified
         struct smb2fh *fh;
+        uint32_t tree_id;
         // filter of SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_* flags
         uint16_t filter;
         // flags such as SMB2_CHANGE_NOTIFY_WATCH_TREE
@@ -5204,7 +5205,7 @@ struct notify_change_cb_data {
 
 static int
 notify_change_fh_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh,
-                       uint16_t flags, uint32_t filter, int loop, int owns_fh,
+                       uint32_t tree_id, uint16_t flags, uint32_t filter, int loop, int owns_fh,
                        smb2_command_cb cb, void *cb_data);
 
 static void
@@ -5306,7 +5307,8 @@ notify_change_cb(struct smb2_context *smb2, int status,
                 );
         }
         if (notify_change_data->loop && !decode_status &&
-            notify_change_fh_async(smb2, notify_change_data->fh, notify_change_data->flags, notify_change_data->filter,
+            notify_change_fh_async(smb2, notify_change_data->fh, notify_change_data->tree_id,
+                        notify_change_data->flags, notify_change_data->filter,
                         notify_change_data->loop, notify_change_data->owns_fh,
                         notify_change_data->cb, notify_change_data->cb_data) == 0) {
                 /* re-armed, the new request has the handle now */
@@ -5323,7 +5325,7 @@ notify_change_cb(struct smb2_context *smb2, int status,
 
 static int
 notify_change_fh_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh,
-                       uint16_t flags, uint32_t filter, int loop, int owns_fh,
+                       uint32_t tree_id, uint16_t flags, uint32_t filter, int loop, int owns_fh,
                        smb2_command_cb cb, void *cb_data)
 {
         struct notify_change_cb_data *notify_change_cb_data;
@@ -5339,6 +5341,7 @@ notify_change_fh_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh,
         notify_change_cb_data->cb = cb;
         notify_change_cb_data->cb_data = cb_data;
         notify_change_cb_data->fh = smb2_dir_fh;
+        notify_change_cb_data->tree_id = tree_id;
 
         notify_change_cb_data->flags = flags;
         notify_change_cb_data->filter = filter;
@@ -5360,6 +5363,7 @@ notify_change_fh_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh,
                 free(notify_change_cb_data);
                 return -1;
         }
+        smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
                 free(notify_change_cb_data);
@@ -5372,7 +5376,11 @@ notify_change_fh_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh,
 int smb2_notify_change_filehandle_async(struct smb2_context *smb2, struct smb2fh *smb2_dir_fh, uint16_t flags, uint32_t filter, int loop,
                        smb2_command_cb cb, void *cb_data)
 {
-        return notify_change_fh_async(smb2, smb2_dir_fh, flags, filter, loop, 0, cb, cb_data);
+        if (smb2 == NULL || smb2_dir_fh == NULL) {
+                return -EINVAL;
+        }
+        return notify_change_fh_async(smb2, smb2_dir_fh, file_handle_tree_id(smb2, smb2_dir_fh),
+                                      flags, filter, loop, 0, cb, cb_data);
 }
 
 int smb2_notify_change_async(struct smb2_context *smb2, const char *path, uint16_t flags, uint32_t filter, int loop,
@@ -5384,7 +5392,7 @@ int smb2_notify_change_async(struct smb2_context *smb2, const char *path, uint16
                 smb2_set_error(smb2, "smb2_open failed. %s\n", smb2_get_error(smb2));
                 return -1;
         }
-        if (notify_change_fh_async(smb2, fh, flags, filter, loop, 1, cb, cb_data) < 0) {
+        if (notify_change_fh_async(smb2, fh, fh->open_tree_id, flags, filter, loop, 1, cb, cb_data) < 0) {
                 smb2_close(smb2, fh);
                 return -1;
         }
