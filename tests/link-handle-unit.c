@@ -5,7 +5,10 @@
 #undef NDEBUG
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/socket.h>
@@ -43,6 +46,19 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
         if (id_offset >= 0) {
                 assert(!memcmp(pdu->out.iov[1].buf + id_offset, opened_id, sizeof(opened_id)));
         }
+        if (command == SMB2_IOCTL && status == SMB2_STATUS_SUCCESS) {
+                struct smb2_iovec *rp = &pdu->out.iov[2];
+                uint16_t offset, length;
+                const char *name;
+
+                assert(rp->len >= 20);
+                offset = rp->buf[8] | (rp->buf[9] << 8);
+                length = rp->buf[10] | (rp->buf[11] << 8);
+                assert(20u + offset + length <= rp->len);
+                name = smb2_utf16_to_utf8((const uint16_t *)(rp->buf + 20 + offset), length / 2);
+                assert(name && !strcmp(name, "\\??\\UNC\\server\\share\\target"));
+                free((void *)name);
+        }
         if (command == SMB2_SET_INFO) {
                 assert(pdu->out.iov[1].buf[3] == SMB2_FILE_DISPOSITION_INFORMATION);
                 assert(pdu->out.iov[2].buf[0] == 1);
@@ -70,7 +86,8 @@ static void run(struct smb2_context *smb2, enum operation op)
         if (unlink_op) {
                 assert(!smb2_unlink_async(smb2, "link", completed, &result));
         } else {
-                assert(!smb2_symlink_async(smb2, "target", "link", SMB2_SYMLINK_DIRECTORY,
+                assert(!smb2_symlink_async(smb2, op == CREATE_LINK ? "//server/share/target" : "target",
+                                           "link", SMB2_SYMLINK_DIRECTORY,
                                            completed, &result));
         }
         /* New operations on this context now use a different share. */
