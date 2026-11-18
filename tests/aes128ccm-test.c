@@ -7,6 +7,31 @@
 
 #include "lib/aes128ccm.h"
 
+static void test_aad_length(void)
+{
+        static const struct {
+                uint64_t length;
+                size_t size;
+                unsigned char bytes[10];
+        } cases[] = {
+                {0xfeff, 2, {0xfe, 0xff}},
+                {0xff00, 6, {0xff, 0xfe, 0, 0, 0xff, 0}},
+                {UINT32_MAX, 6, {0xff, 0xfe, 0xff, 0xff, 0xff, 0xff}},
+                {UINT64_C(0x100000000), 10, {0xff, 0xff, 0, 0, 0, 1, 0, 0, 0, 0}},
+                {UINT64_MAX, 10, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
+        };
+        unsigned char buf[10];
+        size_t i;
+
+        for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+                if (ccm_encode_aad_length(buf, cases[i].length) != cases[i].size ||
+                    memcmp(buf, cases[i].bytes, cases[i].size) != 0) {
+                        fprintf(stderr, "Invalid CCM AAD length prefix in case %zu\n", i);
+                        exit(1);
+                }
+        }
+}
+
 void test_1(void)
 {
   unsigned char key[16]  = {0x40, 0x41, 0x42, 0x43,  0x44, 0x45, 0x46, 0x47,
@@ -113,6 +138,7 @@ void test_2(void)
 
 int main(int argc, char *argv[])
 {
+        test_aad_length();
         test_1();
         test_2();
         return 0;
