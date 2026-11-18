@@ -18,6 +18,20 @@ echo -n "Verify file content match ... "
 cmp testfile testfile2 || failure
 success
 
+echo -n "Reject copying a local file onto a hard link to itself ... "
+rm -f testfile.link
+ln testfile testfile.link || failure
+../utils/smb2-cp testfile testfile.link 2>/dev/null && failure
+cmp testfile testfile2 || failure
+rm -f testfile.link
+success
+
+echo -n "Reject copying an SMB file onto itself ... "
+../utils/smb2-cp "${TESTURL}/testfile" "${TESTURL}/testfile" 2>/dev/null && failure
+../utils/smb2-cp "${TESTURL}/testfile" testfile2 >/dev/null || failure
+cmp testfile testfile2 || failure
+success
+
 if [ -r /sys/devices/system/cpu/kernel_max ] && command -v timeout >/dev/null 2>&1; then
     echo -n "Stop at EOF when the source reports a larger size ... "
     timeout 5 ../utils/smb2-cp /sys/devices/system/cpu/kernel_max testfile2 >/dev/null || failure

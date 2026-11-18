@@ -94,6 +94,51 @@ file_error(struct file_context *fc)
 	return strerror(errno);
 }
 
+/* Compare opened files, including hard links. SMB file indices are
+ * meaningful within a volume; copies through other share names or local
+ * mount points remain safe because truncation is deferred until EOF. */
+static int
+same_file(struct file_context *src, struct file_context *dst, int *dst_regular)
+{
+	struct stat src_st, dst_st;
+
+	*dst_regular = 1;
+	if (dst->is_smb2) {
+		struct smb2_stat_64 a, b;
+
+		if (!src->is_smb2 || strcmp(src->url->server, dst->url->server) ||
+		    strcmp(src->url->share, dst->url->share)) {
+			return 0;
+		}
+		if (src->url->path && dst->url->path &&
+		    !strcmp(src->url->path, dst->url->path)) {
+			return 1;
+		}
+		if (smb2_fstat(src->smb2, src->smb2fh, &a) < 0 || !a.smb2_ino) {
+			return 0;
+		}
+		/* The write handle may lack READ_ATTRIBUTES. Query the path
+		 * with attribute access in that case. Deferred truncation also
+		 * protects aliases when the server denies both queries. */
+		if (smb2_fstat(dst->smb2, dst->smb2fh, &b) < 0 &&
+		    smb2_stat(dst->smb2, dst->url->path, &b) < 0) {
+			return 0;
+		}
+		return a.smb2_ino == b.smb2_ino;
+	}
+	if (fstat(dst->fd, &dst_st) < 0) {
+		return -1;
+	}
+	*dst_regular = S_ISREG(dst_st.st_mode);
+	if (src->is_smb2) {
+		return 0;
+	}
+	if (fstat(src->fd, &src_st) < 0) {
+		return -1;
+	}
+	return src_st.st_dev == dst_st.st_dev && src_st.st_ino == dst_st.st_ino;
+}
+
 static struct file_context *
 open_file(const char *url, int flags)
 {
@@ -165,6 +210,7 @@ static uint8_t buf[BUFSIZE];
 
 int main(int argc, char *argv[])
 {
+	int dst_regular, same;
 	struct file_context *src;
 	struct file_context *dst;
 	uint64_t off = 0;
@@ -192,11 +238,21 @@ int main(int argc, char *argv[])
 		return 10;
 	}
 
-	dst = open_file(argv[2], O_WRONLY|O_CREAT|O_TRUNC);
+	dst = open_file(argv[2], O_WRONLY|O_CREAT);
 	if (dst == NULL) {
 		fprintf(stderr, "Failed to open %s\n", argv[2]);
 		free_file_context(src);
 		return 10;
+	}
+
+	same = same_file(src, dst, &dst_regular);
+	if (same < 0) {
+		fprintf(stderr, "Failed to stat local file: %s\n", strerror(errno));
+		goto out;
+	}
+	if (same) {
+		fprintf(stderr, "Source and destination are the same file\n");
+		goto out;
 	}
 
 	for (;;) {
@@ -230,6 +286,14 @@ int main(int argc, char *argv[])
 			written += n;
 			off += n;
 		}
+	}
+	/* Trim the old tail only after reading the source to EOF. Even a
+	 * local path and a share URL can refer to the same underlying file. */
+	if (dst_regular &&
+	    (dst->is_smb2 ? smb2_ftruncate(dst->smb2, dst->smb2fh, off)
+	                  : ftruncate(dst->fd, (off_t)off)) < 0) {
+		fprintf(stderr, "Failed to truncate destination: %s\n", file_error(dst));
+		goto out;
 	}
 	if (close_file(dst) < 0) {
 		fprintf(stderr, "Failed to close destination: %s\n", file_error(dst));
