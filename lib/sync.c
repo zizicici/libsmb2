@@ -64,7 +64,7 @@
 
 static int sync_in_service(struct smb2_context *smb2)
 {
-        if (smb2 && (smb2->servicing || smb2->in_queue_abort)) {
+        if (smb2_is_dispatching(smb2)) {
                 /* Preserve the dispatch error and avoid reentering its error callback. */
                 errno = EDEADLK;
                 return 1;

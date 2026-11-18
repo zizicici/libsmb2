@@ -3461,87 +3461,70 @@ dcerpc_call_async(struct dcerpc_context *dce,
  */
 struct dcerpc_sync_cb_data {
         int is_finished;
-        /*
-         * The sync caller gave up waiting (dcerpc_wait_for_reply()
-         * failed) while the call was still pending: the callback frees
-         * this and the reply, if it ever comes.
-         */
-        int abandoned;
         int status;
         void *ptr;
 };
 
-static int
-dcerpc_wait_for_reply(struct smb2_context *smb2, struct dcerpc_sync_cb_data *cb_data)
-{
-        while (!cb_data->is_finished) {
-                struct pollfd pfd;
-
-                memset(&pfd, 0, sizeof(pfd));
-                pfd.fd = smb2_get_fd(smb2);
-                pfd.events = smb2_which_events(smb2);
-
-                if (poll(&pfd, 1, 1000) < 0) {
-                        smb2_set_error(smb2, "Poll failed");
-                        return -1;
-                }
-                /*
-                 * Service even when idle: libsmb2 only times out PDUs
-                 * from smb2_service(), so a server that never answers
-                 * would otherwise keep us here for ever.
-                 */
-                if (smb2_service(smb2, pfd.revents) < 0) {
-                        /*
-                         * Our reply was processed before the error, as
-                         * lib/sync.c: the call completed, so return it.
-                         */
-                        if (cb_data->is_finished) {
-                                break;
-                        }
-                        smb2_set_error(smb2, "smb2_service failed with : "
-                                       "%s\n", smb2_get_error(smb2));
-                        return -1;
-                }
-        }
-        return 0;
-}
-
 static void
-dcerpc_call_sync_cb(struct dcerpc_context *dce, int status,
+dcerpc_call_sync_cb(struct dcerpc_context *dce _U_, int status,
                     void *command_data, void *cb_data)
 {
         struct dcerpc_sync_cb_data *scb = cb_data;
 
-        if (scb->abandoned) {
-                if (command_data != NULL) {
-                        dcerpc_free_data(dce, command_data);
-                }
-                free(scb);
-                return;
-        }
         scb->status = status;
         scb->ptr = command_data;
         scb->is_finished = 1;
 }
 
-/*
- * dcerpc_wait_for_reply() failed. If the call already completed, free
- * what it left; else it is still pending and its callback will run later
- * (when the reply, a timeout or dcerpc_destroy_context() comes), so leave
- * scb for dcerpc_call_sync_cb() to free then.
- */
-static void
-dcerpc_abandon_sync(struct dcerpc_context *dce,
-                    struct dcerpc_sync_cb_data *scb)
+static int
+dcerpc_sync_in_dispatch(struct smb2_context *smb2 _U_)
 {
-        if (scb->is_finished) {
-                if (scb->ptr != NULL) {
-                        dcerpc_free_data(dce, scb->ptr);
-                }
-                free(scb);
-                return;
+#ifdef SMB2_HAVE_IS_DISPATCHING
+        if (smb2_is_dispatching(smb2)) {
+                errno = EDEADLK;
+                return 1;
         }
-        scb->abandoned = 1;
+#endif
+        return 0;
+}
+
+static int
+dcerpc_wait_for_reply(struct dcerpc_context *dce, struct dcerpc_sync_cb_data *scb)
+{
+        struct smb2_context *smb2 = dce->smb2;
+        struct dcerpc_pending *p;
+
+        while (!scb->is_finished) {
+                struct pollfd pfd = {0};
+
+                pfd.fd = smb2_get_fd(smb2);
+                pfd.events = smb2_which_events(smb2);
+                if (poll(&pfd, 1, 1000) < 0) {
+                        if (errno != EINTR) {
+                                smb2_set_error(smb2, "Poll failed");
+                                break;
+                        }
+                        pfd.revents = 0;
+                }
+                /* Service on idle ticks and after signals to run SMB timeouts. */
+                if (smb2_service(smb2, pfd.revents) < 0) {
+                        break;
+                }
+        }
+        if (scb->is_finished) {
+                return scb->status;
+        }
+
+        /* The decoder may borrow the synchronous caller's request. Make a
+         * late SMB completion take the same cleanup path as context teardown. */
+        for (p = dce->pending; p; p = p->next) {
+                if (p->cb == dcerpc_call_sync_cb && p->cb_data == scb) {
+                        dcerpc_untrack(dce, p);
+                        p->orphaned = 1;
+                        break;
+                }
+        }
+        return -1;
 }
 
 void *
@@ -3551,8 +3534,7 @@ dcerpc_call(struct dcerpc_context *dce,
             dcerpc_coder rep_coder, int decode_size)
 {
         struct smb2_context *smb2;
-        struct dcerpc_sync_cb_data *scb;
-        void *rep = NULL;
+        struct dcerpc_sync_cb_data scb = {0};
         int rc;
 
         if (dce == NULL) {
@@ -3564,36 +3546,21 @@ dcerpc_call(struct dcerpc_context *dce,
                 return NULL;
         }
 
-        scb = calloc(1, sizeof(*scb));
-        if (scb == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
+        if (dcerpc_sync_in_dispatch(smb2)) {
                 return NULL;
         }
-
         rc = dcerpc_call_async(dce, opnum, req_coder, req, rep_coder,
-                               decode_size, dcerpc_call_sync_cb, scb);
+                               decode_size, dcerpc_call_sync_cb, &scb);
         if (rc != 0) {
-                free(scb);
                 return NULL;
         }
-
-        if (dcerpc_wait_for_reply(smb2, scb) < 0) {
-                dcerpc_abandon_sync(dce, scb);
-                return NULL;
-        }
-
-        if (scb->status != (int)SMB2_STATUS_SUCCESS) {
-                /* Reply root may still be present on some error paths. */
-                if (scb->ptr != NULL) {
-                        dcerpc_free_data(dce, scb->ptr);
+        if (dcerpc_wait_for_reply(dce, &scb) != 0) {
+                if (scb.ptr) {
+                        dcerpc_free_data(dce, scb.ptr);
                 }
-                free(scb);
                 return NULL;
         }
-
-        rep = scb->ptr;
-        free(scb);
-        return rep;
+        return scb.ptr;
 }
 
 /*
@@ -3608,7 +3575,7 @@ dcerpc_connect_context(struct dcerpc_context *dce, const char *path,
                        p_syntax_id_t *syntax)
 {
         struct smb2_context *smb2;
-        struct dcerpc_sync_cb_data *scb;
+        struct dcerpc_sync_cb_data scb = {0};
         int rc;
 
         if (dce == NULL) {
@@ -3619,48 +3586,15 @@ dcerpc_connect_context(struct dcerpc_context *dce, const char *path,
                 return dcerpc_need_smb2(dce);
         }
 
-        scb = calloc(1, sizeof(*scb));
-        if (scb == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
-                return -ENOMEM;
+        if (dcerpc_sync_in_dispatch(smb2)) {
+                return -EDEADLK;
         }
-
         rc = dcerpc_connect_context_async(dce, path, syntax,
-                                          dcerpc_call_sync_cb, scb);
+                                          dcerpc_call_sync_cb, &scb);
         if (rc != 0) {
-                free(scb);
                 return rc;
         }
-
-        if (dcerpc_wait_for_reply(smb2, scb) < 0) {
-                dcerpc_abandon_sync(dce, scb);
-                return -1;
-        }
-
-        rc = scb->status;
-        free(scb);
-
-        if (rc != (int)SMB2_STATUS_SUCCESS) {
-                return rc ? rc : -1;
-        }
-
-        return 0;
-}
-
-static void
-dcerpc_bind_cb(struct dcerpc_context *dce, int status,
-               void *command_data, void *cb_data)
-{
-        struct dcerpc_cb_data *data = cb_data;
-
-        if (status != SMB2_STATUS_SUCCESS) {
-                data->cb(dce, status, NULL, data->cb_data);
-                free(data);
-                return;
-        }
-
-        data->cb(dce, 0, NULL, data->cb_data);
-        free(data);
+        return dcerpc_wait_for_reply(dce, &scb);
 }
 
 static int dcerpc_bind_ack_auth(struct dcerpc_context *dce,
@@ -4086,14 +4020,11 @@ smb2_open_cb(struct smb2_context *smb2, int status,
         
         memcpy(dce->file_id, rep->file_id, SMB2_FD_SIZE);
 
-        status = dcerpc_bind_async(dce, dcerpc_bind_cb, data);
+        status = dcerpc_bind_async(dce, data->cb, data->cb_data);
         if (status) {
                 data->cb(dce, status, NULL, data->cb_data);
-                free(data);
-                return;
         }
-
-        return;
+        free(data);
 }
 
 int

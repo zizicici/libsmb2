@@ -60,6 +60,23 @@ static uint8_t sent[8192];
 static size_t sent_len;
 static int dummy_pdu;
 
+#ifdef SMB2_HAVE_IS_DISPATCHING
+static int dispatching;
+
+int
+smb2_is_dispatching(struct smb2_context *smb2 _U_)
+{
+        return dispatching;
+}
+
+/* The sync wait test loses its transport after the request is queued. */
+int
+smb2_service(struct smb2_context *smb2 _U_, int revents _U_)
+{
+        return -EIO;
+}
+#endif
+
 struct smb2_pdu *
 smb2_cmd_create_async(struct smb2_context *smb2 _U_,
                       struct smb2_create_request *req _U_,
@@ -346,6 +363,29 @@ session_call(struct session *s)
 
 /* ---------------------------------------------------- the tests */
 
+#ifdef SMB2_HAVE_IS_DISPATCHING
+static void
+test_sync_wait(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        last_cb = NULL;
+        dispatching = 1;
+        CHECK(dcerpc_connect_context(s.dce, "netlogon", &netlogon_syntax) == -EDEADLK);
+        errno = 0;
+        CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
+        CHECK(errno == EDEADLK && last_cb == NULL);
+        dispatching = 0;
+        CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
+        CHECK(last_cb != NULL);
+        memset(got, 0, sizeof(got));
+        reply(s.smb2, 0, rep_l5_hsign, sizeof(rep_l5_hsign));
+        CHECK(got[0] == 0);
+        session_close(&s);
+}
+#endif
+
 static void
 test_bind(void)
 {
@@ -509,6 +549,9 @@ int
 main(void)
 {
         test_bind();
+#ifdef SMB2_HAVE_IS_DISPATCHING
+        test_sync_wait();
+#endif
 #ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
         test_queue_rejection();
 #endif

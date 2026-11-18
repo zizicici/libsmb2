@@ -1618,11 +1618,17 @@ service_fd(struct smb2_context *smb2, t_socket fd, int revents)
 }
 
 int
+smb2_is_dispatching(struct smb2_context *smb2)
+{
+        return smb2 && (smb2->servicing || smb2->in_queue_abort);
+}
+
+int
 smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
 {
         int rc;
 
-        if (smb2->servicing || smb2->in_queue_abort) {
+        if (smb2_is_dispatching(smb2)) {
                 return -EDEADLK;
         }
         smb2->servicing = 1;

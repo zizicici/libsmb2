@@ -307,6 +307,11 @@ void smb2_fd_event_callbacks(struct smb2_context *smb2,
  */
 int smb2_service(struct smb2_context *smb2, int revents);
 
+/* Nonzero while the event loop or a queue abort is dispatching callbacks.
+ * A synchronous call that needs to drive this context can start after dispatch returns. */
+#define SMB2_HAVE_IS_DISPATCHING 1
+int smb2_is_dispatching(struct smb2_context *smb2);
+
 /*
  * Called to process the events when events become available for the smb2
  * file descriptor.

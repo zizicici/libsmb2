@@ -153,6 +153,7 @@ smb2_serve_port
 smb2_serve_port_async
 smb2_server_side_copy
 smb2_server_side_copy_async
+smb2_is_dispatching
 smb2_service
 smb2_service_fd
 smb2_set_authentication
