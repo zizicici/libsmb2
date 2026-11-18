@@ -48,6 +48,7 @@
 #endif
 
 #include "compat.h"
+#include <errno.h>
 
 #include "portable-endian.h"
 
@@ -704,8 +705,8 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
         return ret;
 }
 
-void
-smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+int
+smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
@@ -731,8 +732,11 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                          */
                         if (!pdu->header.message_id && pdu->header.command != SMB2_NEGOTIATE) {
                                 smb2_set_error(smb2, "Queued pdu has no message id");
-                                smb2_free_pdu(smb2, pdu);
-                                return;
+                                smb2->queue_rejected = 1;
+                                if (!pdu->caller_frees_pdu) {
+                                        smb2_free_pdu(smb2, pdu);
+                                }
+                                return -EINVAL;
                         }
 
                         smb2_correlate_reply(smb2, p);
@@ -790,7 +794,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
-                        return;
+                        return -EIO;
                 }
                 smb2->in_queue_abort = 1;
                 for (p = pdu; p; p = p->next_compound) {
@@ -807,7 +811,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         smb2_free_pdu(smb2, pdu);
                 }
                 smb2_close_context(smb2);
-                return;
+                return 0;
         }
 
         /*
@@ -823,6 +827,13 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 
         smb2_add_to_outqueue(smb2, pdu);
+        return 0;
+}
+
+void
+smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        (void)smb2_queue_pdu_checked(smb2, pdu);
 }
 
 struct smb2_pdu *

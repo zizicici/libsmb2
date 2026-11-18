@@ -133,6 +133,7 @@ smb2_pread_async
 smb2_pwrite
 smb2_pwrite_async
 smb2_queue_pdu
+smb2_queue_pdu_checked
 smb2_read
 smb2_read_async
 smb2_readdir

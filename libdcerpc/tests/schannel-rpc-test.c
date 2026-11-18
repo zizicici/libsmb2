@@ -33,6 +33,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 
 #include <smb2/smb2.h>
@@ -103,6 +104,16 @@ void
 smb2_queue_pdu(struct smb2_context *smb2 _U_, struct smb2_pdu *pdu _U_)
 {
 }
+
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+static int queue_result;
+
+int
+smb2_queue_pdu_checked(struct smb2_context *smb2 _U_, struct smb2_pdu *pdu _U_)
+{
+        return queue_result;
+}
+#endif
 
 /* The replies the test hands over are malloc()ed */
 void
@@ -351,6 +362,21 @@ test_bind(void)
         session_close(&s);
 }
 
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+static void
+test_queue_rejection(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        queue_result = -EIO;
+        CHECK(session_call(&s) == -EIO);
+        queue_result = 0;
+        session_close(&s);
+        CHECK(!cb_done);
+}
+#endif
+
 static void
 test_signed(int hsign, const uint8_t *req, size_t req_len,
             const uint8_t *rep, size_t rep_len)
@@ -452,6 +478,9 @@ int
 main(void)
 {
         test_bind();
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+        test_queue_rejection();
+#endif
         test_signed(1, req_l5_hsign, sizeof(req_l5_hsign),
                     rep_l5_hsign, sizeof(rep_l5_hsign));
         test_signed(0, req_l5_nohsign, sizeof(req_l5_nohsign),

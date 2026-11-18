@@ -773,6 +773,10 @@ void smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
 
 void smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
+/* Returns 0 when submitted or completed inline, or -errno when rejected
+ * without a callback. The usual PDU ownership rules apply in both cases. */
+#define SMB2_HAVE_QUEUE_PDU_CHECKED 1
+int smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu);
 
 /*
  * These are used to access/modify pdus from application level

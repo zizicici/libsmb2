@@ -79,6 +79,14 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <smb2/smb2.h>
 #include <smb2/libsmb2.h>
 #include <smb2/libsmb2-raw.h>
+#ifndef SMB2_HAVE_QUEUE_PDU_CHECKED
+/* Standalone builds can use older versions of the libsmb2 transport. */
+static int smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        smb2_queue_pdu(smb2, pdu);
+        return 0;
+}
+#endif
 #endif
 #include <dcerpc/dcerpc.h>
 #include <dcerpc/dcerpc-dtyp.h>
@@ -2877,7 +2885,11 @@ dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 free(fr);
                 return -ENOMEM;
         }
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
+        if (smb2_queue_pdu_checked(dce->smb2, smb2_pdu) < 0) {
+                free(fr->buf);
+                free(fr);
+                return -EIO;
+        }
         return 0;
 }
 
@@ -3334,8 +3346,7 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
         if (smb2_pdu == NULL) {
                 return -ENOMEM;
         }
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
-        return 0;
+        return smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -3367,6 +3378,7 @@ dcerpc_call_async(struct dcerpc_context *dce,
         struct dcerpc_pdu *pdu = NULL;
         struct dcerpc_iovec iov = {0};
         size_t max_frag, len;
+        int rc;
 
         if (dce->destroying) {
                 return -ECANCELED;
@@ -3424,10 +3436,11 @@ dcerpc_call_async(struct dcerpc_context *dce,
          * dcerpc_send_request_frag() returns. Tracking afterwards would
          * write the freed pdu back onto dce->pending. */
         dcerpc_track(dce, &pdu->pending, cb, cb_data);
-        if (dcerpc_send_request_frag(dce, pdu)) {
+        rc = dcerpc_send_request_frag(dce, pdu);
+        if (rc) {
                 dcerpc_untrack(dce, &pdu->pending);
                 dcerpc_free_pdu(dce, pdu);
-                return -ENOMEM;
+                return rc;
         }
         return 0;
 }
@@ -4009,7 +4022,11 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 return -ENOMEM;
         }
         dcerpc_track(dce, &pdu->pending, cb, cb_data);
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
+        if (smb2_queue_pdu_checked(dce->smb2, smb2_pdu) < 0) {
+                dcerpc_untrack(dce, &pdu->pending);
+                dcerpc_free_pdu(dce, pdu);
+                return -EIO;
+        }
  
         return 0;
 }
@@ -4110,8 +4127,11 @@ dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 return -ENOMEM;
         }
         dcerpc_track(dce, &data->pending, cb, cb_data);
-        smb2_queue_pdu(dce->smb2, pdu);
-
+        if (smb2_queue_pdu_checked(dce->smb2, pdu) < 0) {
+                dcerpc_untrack(dce, &data->pending);
+                free(data);
+                return -EIO;
+        }
         return 0;
 }
 
