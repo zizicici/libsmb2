@@ -69,6 +69,7 @@ if(ESP_PLATFORM)
 
 elseif(IOP AND BUILD_IRX)
   set(SOURCES
+            ps2/entropy.c
             ps2/smb2_fio.c
             ps2/smb2man.c
             ps2/imports.c

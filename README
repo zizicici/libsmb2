@@ -338,6 +338,13 @@ Then to build libsmb2, run
   $ make -f Makefile.platform clean  
   $ make -f Makefile.platform ps2_irx_install
 
+Before SMB2_DEVCTL_CONNECT, seed the smb2man.irx driver's SHA-256 HMAC_DRBG
+from the EE. Generate SMB2_ENTROPY_SEED_SIZE fresh cryptographically random
+bytes (32 bytes of entropy and a 16-byte nonce), then call
+fileXioDevctl("smb:", SMB2_DEVCTL_SET_ENTROPY, seed, sizeof(seed), NULL, 0).
+Repeat after reloading the driver. The same command can reseed a running
+driver with fresh input. A connection attempted before seeding returns -EAGAIN.
+
 PlayStation 3
 -------------
 PPU, PowerPC, is the main CPU for the PS3.
