@@ -3893,6 +3893,7 @@ struct symlink_cb_data {
         uint32_t tree_id;
         smb2_file_id file_id;
         uint8_t *reparse;
+        struct smb2_pdu *close_pdu;
         int opened;
         int delete_on_close;
         /* Both compound replies must arrive before the handle is disposed. */
@@ -3917,6 +3918,9 @@ link_finish(struct smb2_context *smb2, struct symlink_cb_data *data,
                 smb2_set_nterror(smb2, status, "Link operation failed: %s",
                                  nterror_to_str(status));
         }
+        if (data->close_pdu) {
+                smb2_free_pdu(smb2, data->close_pdu);
+        }
         data->cb(smb2, -nterror_to_errno(status), NULL, data->cb_data);
         free_symlink_data(data);
 }
@@ -3934,20 +3938,36 @@ link_close_cb(struct smb2_context *smb2, int status,
 static void
 link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
 {
-        struct smb2_close_request req = {0};
-        struct smb2_pdu *pdu;
+        struct smb2_pdu *pdu = data->close_pdu;
 
-        memcpy(req.file_id, data->file_id, SMB2_FD_SIZE);
-        pdu = smb2_cmd_close_async(smb2, &req, link_close_cb, data);
-        if (pdu == NULL) {
-                link_finish(smb2, data, SMB2_STATUS_NO_MEMORY);
-                return;
-        }
-        smb2_set_tree_id_for_pdu(smb2, pdu, data->tree_id);
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        data->close_pdu = NULL;
+        smb2_set_close_file_id(pdu, data->file_id);
+        pdu->timeout = smb2->timeout ? time(NULL) + smb2->timeout : 0;
+        if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
+}
+
+/* Reserve CLOSE before CREATE can acquire a remote handle. */
+static int
+link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
+            struct smb2_pdu *create)
+{
+        struct smb2_close_request req = {0};
+
+        data->close_pdu = smb2_cmd_close_async(smb2, &req, link_close_cb, data);
+        if (!data->close_pdu) {
+                smb2_free_pdu(smb2, create);
+                free_symlink_data(data);
+                return -ENOMEM;
+        }
+        smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
+        if (smb2_queue_pdu_checked(smb2, create) < 0) {
+                smb2_free_pdu(smb2, data->close_pdu);
+                free_symlink_data(data);
+                return -EIO;
+        }
+        return 0;
 }
 
 static void
@@ -4118,12 +4138,7 @@ unlink_dir_link_async(struct smb2_context *smb2, const char *path,
         smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
         smb2_set_tree_id_for_pdu(smb2, query, tree_id);
         smb2_add_compound_pdu(smb2, pdu, query);
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                free(data);
-                return -EIO;
-        }
-        return 0;
+        return link_submit(smb2, data, pdu);
 }
 
 /*
@@ -4305,13 +4320,7 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         /* Keep the created handle open until the IOCTL result is known. */
         symlink_data->tree_id = pdu->header.sync.tree_id;
         symlink_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                free_symlink_data(symlink_data);
-                return -EIO;
-        }
-
-        return 0;
+        return link_submit(smb2, symlink_data, pdu);
 }
 
 struct readlink_cb_data {
