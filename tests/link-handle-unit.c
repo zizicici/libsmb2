@@ -1,4 +1,4 @@
-/* Offline checks for handle-based symlink creation and cleanup. LGPL-2.1-or-later. */
+/* Offline checks for handle-based symlink deletion and cleanup. LGPL-2.1-or-later. */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -20,7 +20,7 @@
 static const uint32_t original_tree = 11, other_tree = 22;
 static const smb2_file_id opened_id = {1, 2, 3, 4, 5, 6, 7, 8};
 
-enum operation { CREATE_LINK, FAIL_CREATE_LINK };
+enum operation { UNLINK_DIRECTORY, UNLINK_LINK, CREATE_LINK, FAIL_CREATE_LINK };
 
 struct result {
         int completed;
@@ -61,23 +61,46 @@ static void run(struct smb2_context *smb2, enum operation op)
 {
         struct result result = {0};
         struct smb2_create_reply created = {0};
+        struct smb2_query_info_reply query = {0};
+        struct smb2_file_attribute_tag_info *tag;
+        int unlink_op = op == UNLINK_DIRECTORY || op == UNLINK_LINK;
 
         smb2->credits = 32;
         assert(!smb2_select_tree_id(smb2, original_tree));
-        assert(!smb2_symlink_async(smb2, "target", "link", SMB2_SYMLINK_DIRECTORY,
-                                   completed, &result));
+        if (unlink_op) {
+                assert(!smb2_unlink_async(smb2, "link", completed, &result));
+        } else {
+                assert(!smb2_symlink_async(smb2, "target", "link", SMB2_SYMLINK_DIRECTORY,
+                                           completed, &result));
+        }
         /* New operations on this context now use a different share. */
         assert(!smb2_select_tree_id(smb2, other_tree));
+        if (unlink_op) {
+                reply(smb2, SMB2_CREATE, SMB2_STATUS_FILE_IS_A_DIRECTORY, NULL, &result, -1);
+                reply(smb2, SMB2_CLOSE, SMB2_STATUS_FILE_IS_A_DIRECTORY, NULL, &result, -1);
+        }
         memcpy(created.file_id, opened_id, sizeof(opened_id));
         reply(smb2, SMB2_CREATE, 0, &created, &result, -1);
-        reply(smb2, SMB2_IOCTL, op == FAIL_CREATE_LINK ? SMB2_STATUS_ACCESS_DENIED : 0,
-              NULL, &result, -1);
-        if (op == FAIL_CREATE_LINK) {
+        if (unlink_op) {
+                tag = smb2_alloc_init(smb2, sizeof(*tag));
+                assert(tag);
+                tag->file_attributes = SMB2_FILE_ATTRIBUTE_DIRECTORY;
+                if (op == UNLINK_LINK) {
+                        tag->file_attributes |= SMB2_FILE_ATTRIBUTE_REPARSE_POINT;
+                        tag->reparse_tag = SMB2_REPARSE_TAG_SYMLINK;
+                }
+                query.output_buffer = tag;
+                reply(smb2, SMB2_QUERY_INFO, 0, &query, &result, -1);
+        } else {
+                reply(smb2, SMB2_IOCTL, op == FAIL_CREATE_LINK ? SMB2_STATUS_ACCESS_DENIED : 0,
+                      NULL, &result, -1);
+        }
+        if (op == UNLINK_LINK || op == FAIL_CREATE_LINK) {
                 reply(smb2, SMB2_SET_INFO, 0, NULL, &result, 16);
         }
         reply(smb2, SMB2_CLOSE, 0, NULL, &result, 8);
         assert(result.completed == 1 && smb2->waitqueue == NULL);
-        assert((result.status == 0) == (op == CREATE_LINK));
+        assert((result.status == 0) == (op == UNLINK_LINK || op == CREATE_LINK));
         if (op == FAIL_CREATE_LINK) {
                 assert(result.status == -EACCES);
         }
@@ -95,7 +118,7 @@ int main(void)
         assert(!smb2_connect_tree_id(smb2, other_tree));
         for (passthrough = 0; passthrough <= 1; passthrough++) {
                 smb2_set_passthrough(smb2, passthrough);
-                for (op = CREATE_LINK; op <= FAIL_CREATE_LINK; op++) {
+                for (op = UNLINK_DIRECTORY; op <= FAIL_CREATE_LINK; op++) {
                         run(smb2, op);
                 }
         }

@@ -2769,6 +2769,8 @@ smb2_lseek(struct smb2_context *smb2, struct smb2fh *fh,
 }
 
 struct create_cb_data {
+        char *unlink_path;
+        uint32_t unlink_tree;
         smb2_command_cb cb;
         void *cb_data;
         uint32_t status;
@@ -2783,15 +2785,26 @@ struct create_cb_data {
         int pending;
 };
 
+static int unlink_dir_link_async(struct smb2_context *smb2, const char *path,
+                                 uint32_t tree_id, smb2_command_cb cb, void *cb_data);
+
 static void
 create_complete(struct smb2_context *smb2, struct create_cb_data *create_data)
 {
-        int status = 0;
+        int status = -nterror_to_errno(create_data->status);
 
-        if (create_data->status != SMB2_STATUS_SUCCESS) {
-                status = -nterror_to_errno(create_data->status);
+        if (create_data->status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
+            create_data->unlink_path) {
+                status = unlink_dir_link_async(smb2, create_data->unlink_path,
+                                               create_data->unlink_tree,
+                                               create_data->cb, create_data->cb_data);
+                if (status == 0) {
+                        free(create_data->unlink_path);
+                        free(create_data);
+                        return;
+                }
         }
-
+        free(create_data->unlink_path);
         create_data->cb(smb2, status, NULL, create_data->cb_data);
         free(create_data);
 }
@@ -2810,6 +2823,9 @@ create_cb_2(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (create_data->status == SMB2_STATUS_SUCCESS) {
                 create_data->status = status;
         }
@@ -2822,7 +2838,12 @@ create_cb_1(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
-        if (status != SMB2_STATUS_SUCCESS) {
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (status != SMB2_STATUS_SUCCESS &&
+            !((uint32_t)status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
+              create_data->unlink_path)) {
                 smb2_set_nterror(smb2, status, "Create failed with status %s.",
                                  nterror_to_str(status));
         }
@@ -2868,19 +2889,9 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         cr_req.share_access = SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE |
                 SMB2_FILE_SHARE_DELETE;
         cr_req.create_disposition = SMB2_FILE_OPEN;
-        /*
-         * Open the reparse point itself rather than following it, so that
-         * unlink() removes a symlink instead of what it points at, the
-         * way posix unlink() does. This is ignored for files that are not
-         * reparse points.
-         * rmdir() adds SMB2_FILE_DIRECTORY_FILE so the server rejects a
-         * plain file outright; without it Samba happily DELETE_ON_CLOSEs
-         * one, and rmdir() deletes arbitrary files. unlink() adds the
-         * mirror constraint, SMB2_FILE_NON_DIRECTORY_FILE, so it cannot
-         * delete a plain (empty) directory either. Symlinks still work
-         * in both directions: the reparse-point open addresses the link
-         * itself, which is not a directory no matter what it points at.
-         */
+        /* Ordinary files and rmdir finish in a single round trip. A directory
+         * rejected by unlink is reopened without DELETE_ON_CLOSE and its
+         * reparse tag is checked on the handle before it can be deleted. */
         cr_req.create_options = SMB2_FILE_DELETE_ON_CLOSE |
                 SMB2_FILE_OPEN_REPARSE_POINT |
                 (is_dir ? SMB2_FILE_DIRECTORY_FILE
@@ -2907,9 +2918,19 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        if (!is_dir) {
+                create_data->unlink_tree = pdu->header.sync.tree_id;
+                create_data->unlink_path = strdup(path ? path : "");
+                if (create_data->unlink_path == NULL) {
+                        smb2_free_pdu(smb2, pdu);
+                        free(create_data);
+                        return -ENOMEM;
+                }
+        }
         create_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
+                free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
         }
@@ -4015,6 +4036,86 @@ symlink_ioctl_cb(struct smb2_context *smb2, int status,
         /* Clean up the placeholder if converting it into a link failed. */
         data->delete_on_close = status != SMB2_STATUS_SUCCESS;
         link_request_done(smb2, data, status);
+}
+
+static void
+unlink_dir_tag_cb(struct smb2_context *smb2, int status,
+                  void *command_data, void *private_data)
+{
+        struct symlink_cb_data *data = private_data;
+        struct smb2_query_info_reply *rep = command_data;
+        struct smb2_file_attribute_tag_info *tag;
+        struct smb2_stat_64 st;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (status == SMB2_STATUS_SUCCESS) {
+                tag = rep->output_buffer;
+                if (tag == NULL) {
+                        status = SMB2_STATUS_DATA_ERROR;
+                } else {
+                        smb2_set_stat_type(&st, tag->file_attributes, tag->reparse_tag);
+                        if (st.smb2_type == SMB2_TYPE_LINK && tag->reparse_tag != 0) {
+                                data->delete_on_close = 1;
+                        } else {
+                                status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
+                        }
+                        smb2_free_data(smb2, tag);
+                }
+        }
+        link_request_done(smb2, data, status);
+}
+
+static int
+unlink_dir_link_async(struct smb2_context *smb2, const char *path,
+                      uint32_t tree_id, smb2_command_cb cb, void *cb_data)
+{
+        struct symlink_cb_data *data;
+        struct smb2_create_request cr_req = {0};
+        struct smb2_query_info_request qi_req = {0};
+        struct smb2_pdu *pdu, *query;
+
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                return -ENOMEM;
+        }
+        data->cb = cb;
+        data->cb_data = cb_data;
+        data->tree_id = tree_id;
+        data->pending = 2;
+
+        cr_req.impersonation_level = SMB2_IMPERSONATION_IMPERSONATION;
+        cr_req.desired_access = SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES;
+        /* Keep the tag stable until the disposition request completes. */
+        cr_req.share_access = SMB2_FILE_SHARE_READ;
+        cr_req.create_disposition = SMB2_FILE_OPEN;
+        cr_req.create_options = SMB2_FILE_DIRECTORY_FILE | SMB2_FILE_OPEN_REPARSE_POINT;
+        cr_req.name = path;
+        pdu = smb2_cmd_create_async(smb2, &cr_req, link_open_cb, data);
+        if (pdu == NULL) {
+                free(data);
+                return -ENOMEM;
+        }
+        qi_req.info_type = SMB2_0_INFO_FILE;
+        qi_req.file_info_class = SMB2_FILE_ATTRIBUTE_TAG_INFORMATION;
+        qi_req.output_buffer_length = 8;
+        memcpy(qi_req.file_id, compound_file_id, SMB2_FD_SIZE);
+        query = smb2_cmd_query_info_async(smb2, &qi_req, unlink_dir_tag_cb, data);
+        if (query == NULL) {
+                smb2_free_pdu(smb2, pdu);
+                free(data);
+                return -ENOMEM;
+        }
+        smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
+        smb2_set_tree_id_for_pdu(smb2, query, tree_id);
+        smb2_add_compound_pdu(smb2, pdu, query);
+        smb2_queue_pdu(smb2, pdu);
+        if (smb2->queue_rejected) {
+                free(data);
+                return -EIO;
+        }
+        return 0;
 }
 
 /*
