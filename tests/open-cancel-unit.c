@@ -195,6 +195,23 @@ static void watch_across_tree_switch(struct smb2_context *smb2)
         assert(calls == 2);
 }
 
+static void watch_path_during_dispatch(struct smb2_context *smb2)
+{
+        struct smb2_create_reply created = {0};
+        struct smb2_change_notify_reply rep = {0};
+        int calls = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        smb2->servicing = 1;
+        assert(!smb2_notify_change_async(smb2, "dir", 0,
+                        SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 0, notify_done, &calls));
+        smb2->servicing = 0;
+        reply(smb2, SMB2_CREATE, 0, &created);
+        reply(smb2, SMB2_CHANGE_NOTIFY, 0, &rep);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(calls == 1);
+}
+
 static void copy_across_tree_switch(struct smb2_context *smb2)
 {
         struct smb2_srv_copychunk chunk = {0};
@@ -390,6 +407,7 @@ int main(void)
         assert(owner == NULL && smb2->fhs == NULL);
         timeout_batch(smb2);
         watch_across_tree_switch(smb2);
+        watch_path_during_dispatch(smb2);
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
