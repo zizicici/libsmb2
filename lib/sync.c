@@ -62,46 +62,6 @@
 #include "libsmb2-raw.h"
 #include "libsmb2-private.h"
 
-static int pdu_on_list(struct smb2_pdu *list, struct smb2_pdu *pdu)
-{
-        for (; list; list = list->next) {
-                if (list == pdu) {
-                        return 1;
-                }
-        }
-        return 0;
-}
-
-/*
- * Free a PDU that a sync call owns (caller_frees_pdu) after waiting for it
- * failed, e.g. because the connection dropped. If it has not completed, its
- * callback still owns state such as the smb2dir or smb2fh, so complete it
- * with SMB2_STATUS_SHUTDOWN first, as smb2_destroy_context() does for the
- * PDUs it finds. The sync callback's cb_data must still be valid.
- */
-static void sync_free_pending_pdu(struct smb2_context *smb2,
-                                  struct smb2_pdu *pdu)
-{
-        int pending = 0;
-
-        if (smb2->pdu == pdu) {
-                smb2->pdu = NULL;
-                pending = 1;
-        }
-        if (smb2->next_pdu == pdu) {
-                smb2->next_pdu = NULL;
-                pending = 1;
-        }
-        if (pdu_on_list(smb2->outqueue, pdu) ||
-            pdu_on_list(smb2->waitqueue, pdu)) {
-                pending = 1;
-        }
-        if (pending && pdu->cb) {
-                pdu->cb(smb2, SMB2_STATUS_SHUTDOWN, NULL, pdu->cb_data);
-        }
-        smb2_free_pdu(smb2, pdu);
-}
-
 static int wait_for_reply(struct smb2_context *smb2,
                           struct sync_cb_data *cb_data)
 {
@@ -124,6 +84,9 @@ static int wait_for_reply(struct smb2_context *smb2,
 		}
                 if (smb2->timeout) {
                         smb2_timeout_pdus(smb2);
+                        if (cb_data->is_finished) {
+                                break;
+                        }
                 }
 		if (!SMB2_VALID_SOCKET(smb2->fd) && ((time(NULL) - t) > (smb2->timeout)))
 		{
@@ -226,95 +189,43 @@ int smb2_disconnect_share(struct smb2_context *smb2)
 /*
  * opendir()
  */
-static void sync_opendir_cb(struct smb2_context *smb2, int status,
-                       void *command_data, void *private_data)
+static void sync_open_cb(struct smb2_context *smb2, int status,
+                         void *command_data, void *private_data)
 {
         struct sync_cb_data *cb_data = private_data;
 
-        if (status) {
-                cb_data->status = status;
-        }
         cb_data->is_finished = 1;
         cb_data->ptr = command_data;
 }
 
 struct smb2dir *smb2_opendir(struct smb2_context *smb2, const char *path)
 {
+        struct sync_cb_data cb_data = {0};
         struct smb2_pdu *pdu;
-        struct sync_cb_data *cb_data;
-        struct smb2dir *dir;
 
-        cb_data = calloc(1, sizeof(struct sync_cb_data));
-        if (cb_data == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
-                return NULL;
-        }
-
-	pdu = smb2_opendir_async_pdu(smb2, path, sync_opendir_cb, cb_data, NULL);
+        pdu = smb2_opendir_async_pdu(smb2, path, sync_open_cb, &cb_data, NULL);
         if (pdu == NULL) {
-		smb2_set_error(smb2, "smb2_opendir_async failed");
-                free(cb_data);
-		return NULL;
-	}
-
-	if (wait_for_reply(smb2, cb_data) < 0) {
-                sync_free_pending_pdu(smb2, pdu);
-                free(cb_data);
                 return NULL;
         }
-
-	dir = cb_data->ptr;
-        if (dir) {
-                /* Give ownership of cb_data to dir. It will be freed when dir is freed */
-                dir->free_cb_data = free;
-        } else {
-                free(cb_data);
-        }
+        wait_for_reply(smb2, &cb_data);
+        /* Also cancels any later QUERY_DIRECTORY or CLOSE callback. */
         smb2_free_pdu(smb2, pdu);
-        return dir;
-}
-
-/*
- * open()
- */
-static void sync_open_cb(struct smb2_context *smb2, int status,
-                    void *command_data, void *private_data)
-{
-        struct sync_cb_data *cb_data = private_data;
-
-        cb_data->is_finished = 1;
-        cb_data->ptr = command_data;
+        return cb_data.ptr;
 }
 
 struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
 {
+        struct sync_cb_data cb_data = {0};
         struct smb2_pdu *pdu;
-        struct sync_cb_data *cb_data;
-        void *ptr;
 
-        cb_data = calloc(1, sizeof(struct sync_cb_data));
-        if (cb_data == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
-                return NULL;
-        }
-
-	pdu = smb2_open_async_pdu(smb2, path, flags, sync_open_cb, cb_data, NULL);
+        pdu = smb2_open_async_pdu(smb2, path, flags, sync_open_cb, &cb_data, NULL);
         if (pdu == NULL) {
-		smb2_set_error(smb2, "smb2_open_async failed");
-                free(cb_data);
-		return NULL;
-	}
-
-	if (wait_for_reply(smb2, cb_data) < 0) {
-                sync_free_pending_pdu(smb2, pdu);
-                free(cb_data);
                 return NULL;
         }
-
-	ptr = cb_data->ptr;
+        wait_for_reply(smb2, &cb_data);
+        /* Also cancels any later CREATE following a symbolic link. */
         smb2_free_pdu(smb2, pdu);
-        free(cb_data);
-        return ptr;
+        return cb_data.ptr;
 }
 
 /*

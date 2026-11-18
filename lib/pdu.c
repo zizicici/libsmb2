@@ -389,6 +389,20 @@ smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
 void
 smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
+        if (pdu->dispatching_create ||
+            (pdu->cancel_in_flight && (pdu->out.num_done || smb2->pdu == pdu))) {
+                /* Finish transmitting/receiving this CREATE and close the
+                 * server handle if it succeeded. The transport now owns it. */
+                void (*cancel)(void *) = pdu->dispatching_create ?
+                        pdu->free_cb : pdu->cancel_in_flight;
+                pdu->cancel_in_flight = NULL;
+                pdu->free_cb = NULL;
+                pdu->caller_frees_pdu = 0;
+                if (cancel) {
+                        cancel(pdu->cb_data);
+                }
+                return;
+        }
         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
 

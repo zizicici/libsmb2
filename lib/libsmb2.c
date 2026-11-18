@@ -175,21 +175,21 @@ struct smb2fh {
         smb2_file_id file_id;
         int64_t offset;
         int64_t end_of_file;
+        uint32_t open_tree_id;
 
         /*
          * Kept so that we can open the target instead if the server tells
          * us that the path we asked for was a symlink. Only set for the
-         * plain open path, we do not chase links for an open that asked
-         * for a lease or that hands the pdu back to the caller.
+         * plain open path, since retrying would lose a requested lease.
          */
         char *path;
         int flags;
         int symlink_hops;
+        struct smb2_context *open_context;
 
         /*
          * For smb2_open_async_pdu(): the pdu the caller owns, until the
-         * first callback runs. Freeing the pdu before that cancels the
-         * open, which then frees fh and calls cancel_free_cb(cb_data).
+         * user receives the opened file or an error.
          */
         struct smb2_pdu *cancel_pdu;
         void (*cancel_free_cb)(void *);
@@ -275,9 +275,6 @@ free_smb2dir(struct smb2_context *smb2, struct smb2dir *dir)
                 free(discard_const(dir->entries->dirent.name));
                 free(dir->entries);
                 dir->entries = e;
-        }
-        if (dir->free_cb_data) {
-                dir->free_cb_data(dir->cb_data);
         }
         free(dir);
 }
@@ -490,17 +487,101 @@ decode_dirents(struct smb2_context *smb2, struct smb2dir *dir,
 }
 
 static void
+abandoned_close_cb(struct smb2_context *smb2 _U_, int status _U_,
+                   void *reply _U_, void *data _U_)
+{
+}
+
+/* A cancelled CREATE may already own a server handle. Its CLOSE needs no
+ * application state and the connection can keep processing other requests. */
+static void
+close_abandoned_file(struct smb2_context *smb2, uint32_t tree_id, smb2_file_id file_id)
+{
+        struct smb2_close_request req = {0};
+        struct smb2_pdu *pdu;
+
+        if (!SMB2_VALID_SOCKET(smb2->fd)) {
+                return;
+        }
+        memcpy(req.file_id, file_id, SMB2_FD_SIZE);
+        pdu = smb2_cmd_close_async(smb2, &req, abandoned_close_cb, NULL);
+        if (pdu) {
+                smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
+                smb2_queue_pdu(smb2, pdu);
+        }
+}
+
+/* Detach the application. A request already in flight still owns dir. */
+static void
+abandon_opendir(void *private_data)
+{
+        struct smb2dir *dir = private_data;
+        void *cb_data = dir->cb_data;
+
+        dir->cancel_pdu = NULL;
+        dir->cb = NULL;
+        dir->cb_data = NULL;
+        if (dir->cancel_free_cb) {
+                dir->cancel_free_cb(cb_data);
+        }
+}
+
+/* END_OF_FILE translates to zero for reads, but cannot produce an open
+ * handle or a successful directory listing. */
+static int
+open_error(int status)
+{
+        int err = nterror_to_errno(status);
+        return err ? -err : -EIO;
+}
+
+/* No bytes of the initial CREATE were sent. */
+static void
+opendir_cancelled(void *private_data)
+{
+        struct smb2dir *dir = private_data;
+        void (*release)(void *) = dir->cancel_free_cb;
+        void *cb_data = dir->cb_data;
+
+        free_smb2dir(NULL, dir);
+        if (release) {
+                release(cb_data);
+        }
+}
+
+static void
+opendir_complete(struct smb2_context *smb2, struct smb2dir *dir, int status)
+{
+        smb2_command_cb cb = dir->cb;
+        void *cb_data = dir->cb_data;
+
+        if (dir->cancel_pdu) {
+                dir->cancel_pdu->free_cb = NULL;
+                dir->cancel_pdu = NULL;
+        }
+        dir->cb = NULL;
+        dir->cb_data = NULL;
+        if (cb) {
+                cb(smb2, status, status ? NULL : dir, cb_data);
+        }
+        if (status || cb == NULL) {
+                free_smb2dir(smb2, dir);
+        }
+}
+
+static void
 od_close_cb(struct smb2_context *smb2, int status,
          void *command_data, void *private_data)
 {
         struct smb2dir *dir = private_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
-                dir->cb(smb2, -nterror_to_errno(status),
-                        NULL, dir->cb_data);
-                free_smb2dir(smb2, dir);
+                opendir_complete(smb2, dir, open_error(status));
                 return;
         }
 
@@ -508,7 +589,7 @@ od_close_cb(struct smb2_context *smb2, int status,
         dir->index = 0;
 
         /* dir will be freed in smb2_closedir() */
-        dir->cb(smb2, 0, dir, dir->cb_data);
+        opendir_complete(smb2, dir, 0);
 }
 
 static void
@@ -517,6 +598,15 @@ query_cb(struct smb2_context *smb2, int status,
 {
         struct smb2dir *dir = private_data;
         struct smb2_query_directory_reply *rep = command_data;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (dir->cb == NULL) {
+                close_abandoned_file(smb2, dir->tree_id, dir->file_id);
+                free_smb2dir(smb2, dir);
+                return;
+        }
 
         if (status == SMB2_STATUS_SUCCESS) {
                 struct smb2_iovec vec _U_;
@@ -529,8 +619,7 @@ query_cb(struct smb2_context *smb2, int status,
 
                 ret = decode_dirents(smb2, dir, &vec);
                 if (ret < 0) {
-                        dir->cb(smb2, ret, NULL, dir->cb_data);
-                        free_smb2dir(smb2, dir);
+                        opendir_complete(smb2, dir, ret);
                         return;
                 }
 
@@ -544,14 +633,12 @@ query_cb(struct smb2_context *smb2, int status,
 
                 pdu = smb2_cmd_query_directory_async(smb2, &req, query_cb, dir);
                 if (pdu == NULL) {
-                        dir->cb(smb2, -ENOMEM, NULL, dir->cb_data);
-                        free_smb2dir(smb2, dir);
+                        opendir_complete(smb2, dir, -ENOMEM);
                         return;
                 }
-                smb2_queue_pdu(smb2, pdu);
-                if (smb2->queue_rejected) {
-                        dir->cb(smb2, -EIO, NULL, dir->cb_data);
-                        free_smb2dir(smb2, dir);
+                smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
+                if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+                        opendir_complete(smb2, dir, -EIO);
                         return;
                 }
 
@@ -569,14 +656,12 @@ query_cb(struct smb2_context *smb2, int status,
 
                 pdu = smb2_cmd_close_async(smb2, &req, od_close_cb, dir);
                 if (pdu == NULL) {
-                        dir->cb(smb2, -ENOMEM, NULL, dir->cb_data);
-                        free_smb2dir(smb2, dir);
+                        opendir_complete(smb2, dir, -ENOMEM);
                         return;
                 }
-                smb2_queue_pdu(smb2, pdu);
-                if (smb2->queue_rejected) {
-                        dir->cb(smb2, -EIO, NULL, dir->cb_data);
-                        free_smb2dir(smb2, dir);
+                smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
+                if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+                        opendir_complete(smb2, dir, -EIO);
                         return;
                 }
 
@@ -586,24 +671,32 @@ query_cb(struct smb2_context *smb2, int status,
         smb2_set_nterror(smb2, status, "Query directory failed with (0x%08x) %s. %s",
                        status, nterror_to_str(status),
                        smb2_get_error(smb2));
-        dir->cb(smb2, -nterror_to_errno(status), NULL, dir->cb_data);
-        free_smb2dir(smb2, dir);
+        opendir_complete(smb2, dir, open_error(status));
 }
 
-/* The caller freed the opendir pdu before its callback ran */
+/* Keep the transport's CREATE alive if the application frees its PDU
+ * from a callback. Subsequent requests have their own transport PDU. */
 static void
-opendir_cancelled(void *private_data)
+dispatch_create(struct smb2_pdu *owner, smb2_command_cb complete,
+                struct smb2_context *smb2, int status, void *reply, void *data)
 {
-        struct smb2dir *dir = private_data;
-
-        if (dir->cancel_free_cb) {
-                dir->cancel_free_cb(dir->cb_data);
+        /* Passthrough also reports intermediate asynchronous responses. */
+        if (status == SMB2_STATUS_PENDING) {
+                return;
         }
-        free_smb2dir(NULL, dir);
+        if (owner && owner->cancel_in_flight) {
+                owner->free_cb = owner->cancel_in_flight;
+                owner->cancel_in_flight = NULL;
+                owner->dispatching_create = 1;
+                complete(smb2, status, reply, data);
+                owner->dispatching_create = 0;
+        } else {
+                complete(smb2, status, reply, data);
+        }
 }
 
 static void
-opendir_cb(struct smb2_context *smb2, int status,
+opendir_created(struct smb2_context *smb2, int status,
            void *command_data, void *private_data)
 {
         struct smb2dir *dir = private_data;
@@ -611,17 +704,18 @@ opendir_cb(struct smb2_context *smb2, int status,
         struct smb2_query_directory_request req;
         struct smb2_pdu *pdu;
 
-        /* Completed: freeing the caller's pdu no longer cancels */
-        if (dir->cancel_pdu) {
-                dir->cancel_pdu->free_cb = NULL;
-                dir->cancel_pdu = NULL;
+        if (dir->cb == NULL) {
+                if (status == SMB2_STATUS_SUCCESS) {
+                        close_abandoned_file(smb2, dir->tree_id, rep->file_id);
+                }
+                free_smb2dir(smb2, dir);
+                return;
         }
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Opendir failed with (0x%08x) %s.",
                                status, nterror_to_str(status));
-                dir->cb(smb2, -nterror_to_errno(status), NULL, dir->cb_data);
-                free_smb2dir(smb2, dir);
+                opendir_complete(smb2, dir, open_error(status));
                 return;
         }
 
@@ -637,15 +731,20 @@ opendir_cb(struct smb2_context *smb2, int status,
         pdu = smb2_cmd_query_directory_async(smb2, &req, query_cb, dir);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create query command.");
-                dir->cb(smb2, -ENOMEM, NULL, dir->cb_data);
-                free_smb2dir(smb2, dir);
+                opendir_complete(smb2, dir, -ENOMEM);
                 return;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                dir->cb(smb2, -EIO, NULL, dir->cb_data);
-                free_smb2dir(smb2, dir);
+        smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
+        if (smb2_queue_pdu_checked(smb2, pdu) < 0) {
+                opendir_complete(smb2, dir, -EIO);
         }
+}
+
+static void
+opendir_cb(struct smb2_context *smb2, int status, void *reply, void *data)
+{
+        struct smb2dir *dir = data;
+        dispatch_create(dir->cancel_pdu, opendir_created, smb2, status, reply, dir);
 }
 
 static struct smb2_pdu *
@@ -664,12 +763,17 @@ _smb2_opendir_async(struct smb2_context *smb2, const char *path,
         if (path == NULL) {
                 path = "";
         }
+        if (cb == NULL) {
+                smb2_set_error(smb2, "Opendir requires a completion callback");
+                return NULL;
+        }
 
         dir = calloc(1, sizeof(struct smb2dir));
         if (dir == NULL) {
                 smb2_set_error(smb2, "Failed to allocate smb2dir.");
                 return NULL;
         }
+        dir->tree_id = smb2_tree_id(smb2);
         dir->cb = cb;
         dir->cb_data = cb_data;
         smb2_track_dir(smb2, dir);
@@ -694,6 +798,7 @@ _smb2_opendir_async(struct smb2_context *smb2, const char *path,
                 dir->cancel_pdu = pdu;
                 dir->cancel_free_cb = free_cb;
                 pdu->free_cb = opendir_cancelled;
+                pdu->cancel_in_flight = abandon_opendir;
         }
         pdu->caller_frees_pdu = caller_frees_pdu;
         smb2_queue_pdu(smb2, pdu);
@@ -1766,37 +1871,80 @@ open_retry(struct smb2_context *smb2, struct smb2fh *fh)
                 smb2_set_error(smb2, "Failed to create create command");
                 return -1;
         }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                return -1;
-        }
-
-        return 0;
+        smb2_set_tree_id_for_pdu(smb2, pdu, fh->open_tree_id);
+        return smb2_queue_pdu_checked(smb2, pdu);
 }
 
-/* The caller freed the open pdu before its callback ran */
+static void
+abandon_open(void *private_data)
+{
+        struct smb2fh *fh = private_data;
+        struct smb2_context *smb2 = fh->open_context;
+        struct smb2_pdu *pdu;
+        void (*release)(void *) = fh->cancel_free_cb;
+        void *cb_data = fh->cb_data;
+
+        fh->cancel_pdu = NULL;
+        fh->cb = NULL;
+        fh->cb_data = NULL;
+        /* A retry waiting for credits has not touched its target. Drop
+         * it before a later credit grant can execute O_CREAT or O_TRUNC. */
+        for (pdu = smb2->outqueue; pdu; pdu = pdu->next) {
+                if (pdu->cb == open_cb && pdu->cb_data == fh && !pdu->out.num_done) {
+                        smb2_free_pdu(smb2, pdu);
+                        free_smb2fh(smb2, fh);
+                        break;
+                }
+        }
+        if (release) {
+                release(cb_data);
+        }
+}
+
 static void
 open_cancelled(void *private_data)
 {
         struct smb2fh *fh = private_data;
+        void (*release)(void *) = fh->cancel_free_cb;
+        void *cb_data = fh->cb_data;
 
-        if (fh->cancel_free_cb) {
-                fh->cancel_free_cb(fh->cb_data);
-        }
         free_smb2fh(NULL, fh);
+        if (release) {
+                release(cb_data);
+        }
 }
 
 static void
-open_cb(struct smb2_context *smb2, int status,
+open_complete(struct smb2_context *smb2, struct smb2fh *fh, int status)
+{
+        smb2_command_cb cb = fh->cb;
+        void *cb_data = fh->cb_data;
+
+        if (fh->cancel_pdu) {
+                fh->cancel_pdu->free_cb = NULL;
+                fh->cancel_pdu = NULL;
+        }
+        fh->cb = NULL;
+        fh->cb_data = NULL;
+        cb(smb2, status, status ? NULL : fh, cb_data);
+        if (status) {
+                free_smb2fh(smb2, fh);
+        }
+}
+
+static void
+open_created(struct smb2_context *smb2, int status,
         void *command_data, void *private_data)
 {
         struct smb2fh *fh = private_data;
         struct smb2_create_reply *rep = command_data;
 
-        /* Completed: freeing the caller's pdu no longer cancels */
-        if (fh->cancel_pdu) {
-                fh->cancel_pdu->free_cb = NULL;
-                fh->cancel_pdu = NULL;
+        if (fh->cb == NULL) {
+                if (status == SMB2_STATUS_SUCCESS) {
+                        close_abandoned_file(smb2, fh->open_tree_id, rep->file_id);
+                }
+                free_smb2fh(smb2, fh);
+                return;
         }
 
         if (status == SMB2_STATUS_STOPPED_ON_SYMLINK && fh->path) {
@@ -1805,8 +1953,7 @@ open_cb(struct smb2_context *smb2, int status,
                 if (fh->symlink_hops >= SMB2_MAX_SYMLINK_HOPS) {
                         smb2_set_error(smb2, "Too many levels of symbolic "
                                        "links while opening %s", fh->path);
-                        fh->cb(smb2, -ELOOP, NULL, fh->cb_data);
-                        free_smb2fh(smb2, fh);
+                        open_complete(smb2, fh, -ELOOP);
                         return;
                 }
                 target = symlink_error_target(smb2, fh->path, command_data);
@@ -1817,30 +1964,34 @@ open_cb(struct smb2_context *smb2, int status,
                         if (open_retry(smb2, fh) == 0) {
                                 return;
                         }
-                        fh->cb(smb2, -EIO, NULL, fh->cb_data);
-                        free_smb2fh(smb2, fh);
+                        open_complete(smb2, fh, -EIO);
                         return;
                 }
                 /*
                  * We could not work out where the link went. Report that
                  * rather than the bare STOPPED_ON_SYMLINK.
                  */
-                fh->cb(smb2, -nterror_to_errno(status), NULL, fh->cb_data);
-                free_smb2fh(smb2, fh);
+                open_complete(smb2, fh, open_error(status));
                 return;
         }
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Open failed with (0x%08x) %s.",
                                status, nterror_to_str(status));
-                fh->cb(smb2, -nterror_to_errno(status), NULL, fh->cb_data);
-                free_smb2fh(smb2, fh);
+                open_complete(smb2, fh, open_error(status));
                 return;
         }
 
         memcpy(fh->file_id, rep->file_id, SMB2_FD_SIZE);
         fh->end_of_file = rep->end_of_file;
-        fh->cb(smb2, 0, fh, fh->cb_data);
+        open_complete(smb2, fh, 0);
+}
+
+static void
+open_cb(struct smb2_context *smb2, int status, void *reply, void *data)
+{
+        struct smb2fh *fh = data;
+        dispatch_create(fh->cancel_pdu, open_created, smb2, status, reply, fh);
 }
 
 static struct smb2_pdu *
@@ -1855,6 +2006,10 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
         struct smb2_iovec iov;
 
         if (smb2 == NULL) {
+                return NULL;
+        }
+        if (cb == NULL) {
+                smb2_set_error(smb2, "Open requires a completion callback");
                 return NULL;
         }
 
@@ -1907,14 +2062,17 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
                 free_smb2fh(smb2, fh);
                 return NULL;
         }
+        fh->open_tree_id = pdu->header.sync.tree_id;
         if (req.create_context && req.create_context_length) {
                 free(req.create_context);
         }
 
         if (caller_frees_pdu) {
                 fh->cancel_pdu = pdu;
+                fh->open_context = smb2;
                 fh->cancel_free_cb = free_cb;
                 pdu->free_cb = open_cancelled;
+                pdu->cancel_in_flight = abandon_open;
         }
         pdu->caller_frees_pdu = caller_frees_pdu;
         smb2_queue_pdu(smb2, pdu);

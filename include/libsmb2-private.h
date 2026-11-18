@@ -406,6 +406,9 @@ struct smb2_pdu {
         smb2_command_cb cb;
         void *cb_data;
         void (*free_cb)(void *);
+        /* Detach the user of a sent CREATE while its reply is outstanding. */
+        void (*cancel_in_flight)(void *);
+        int dispatching_create;
 
         /* buffer to avoid having to malloc the headers */
         uint8_t hdr[SMB2_HEADER_SIZE];
@@ -454,15 +457,14 @@ struct smb2_dirent_internal {
 };
 
 struct smb2dir {
+        uint32_t tree_id;
         smb2_command_cb cb;
-        void (*free_cb_data)(void *);
         void *cb_data;
         smb2_file_id file_id;
 
         /*
          * For smb2_opendir_async_pdu(): the pdu the caller owns, until the
-         * first callback runs. Freeing the pdu before that cancels the
-         * opendir, which then frees dir and calls cancel_free_cb(cb_data).
+         * user receives the completed directory or an error.
          */
         struct smb2_pdu *cancel_pdu;
         void (*cancel_free_cb)(void *);
