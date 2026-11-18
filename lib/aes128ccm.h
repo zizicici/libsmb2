@@ -20,6 +20,32 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+/* The nonce leaves L = 15 - nlen bytes for a length or block counter. */
+static inline int ccm_valid_lengths(size_t nlen, size_t plen, size_t mlen)
+{
+        size_t width;
+
+        if (nlen < 7 || nlen > 13 || mlen < 4 || mlen > 16 || (mlen & 1)) {
+                return 0;
+        }
+        width = 15 - nlen;
+        return width >= sizeof(plen) || (plen >> (width * 8)) == 0;
+}
+
+static inline void ccm_format_block(unsigned char block[16], const unsigned char *nonce,
+                                    size_t nlen, unsigned char flags, uint64_t value)
+{
+        size_t i;
+
+        block[0] = flags | (unsigned char)(14 - nlen);
+        memcpy(block + 1, nonce, nlen);
+        for (i = 16; i > 1 + nlen; i--) {
+                block[i - 1] = (unsigned char)value;
+                value >>= 8;
+        }
+}
 
 /* Prefix the first AAD block with its length as specified by RFC 3610 section 2.2. */
 static inline size_t ccm_encode_aad_length(unsigned char *buf, uint64_t alen)

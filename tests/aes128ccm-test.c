@@ -32,6 +32,21 @@ static void test_aad_length(void)
         }
 }
 
+static void test_payload_size(void)
+{
+        unsigned char nonce[7] = {1, 2, 3, 4, 5, 6, 7};
+        unsigned char block[16];
+        const unsigned char expected[16] = {7, 1, 2, 3, 4, 5, 6, 7,
+                                            0, 0, 0, 1, 0, 0, 0, 1};
+
+        ccm_format_block(block, nonce, sizeof(nonce), 0, UINT64_C(0x100000001));
+        if (memcmp(block, expected, sizeof(block)) ||
+            !ccm_valid_lengths(11, UINT32_C(0x80000001), 16) ||
+            ccm_valid_lengths(13, 65536, 16)) {
+                exit(1);
+        }
+}
+
 void test_1(void)
 {
   unsigned char key[16]  = {0x40, 0x41, 0x42, 0x43,  0x44, 0x45, 0x46, 0x47,
@@ -139,6 +154,7 @@ void test_2(void)
 int main(int argc, char *argv[])
 {
         test_aad_length();
+        test_payload_size();
         test_1();
         test_2();
         return 0;
