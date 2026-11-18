@@ -32,6 +32,17 @@ echo -n "Reject copying an SMB file onto itself ... "
 cmp testfile testfile2 || failure
 success
 
+# Optional user-specific shares mapped to different backing directories.
+if [ -n "${TESTURL_PERSONAL_A:-}" ] && [ -n "${TESTURL_PERSONAL_B:-}" ]; then
+    echo -n "Copy the same relative name between two personal shares ... "
+    name="cp-personal-$$"
+    ../utils/smb2-cp testfile "${TESTURL_PERSONAL_A}/${name}" >/dev/null || failure
+    ../utils/smb2-cp "${TESTURL_PERSONAL_A}/${name}" "${TESTURL_PERSONAL_B}/${name}" >/dev/null || failure
+    ../utils/smb2-cp "${TESTURL_PERSONAL_B}/${name}" testfile2 >/dev/null || failure
+    cmp testfile testfile2 || failure
+    success
+fi
+
 if [ -r /sys/devices/system/cpu/kernel_max ] && command -v timeout >/dev/null 2>&1; then
     echo -n "Stop at EOF when the source reports a larger size ... "
     timeout 5 ../utils/smb2-cp /sys/devices/system/cpu/kernel_max testfile2 >/dev/null || failure

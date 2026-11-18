@@ -94,9 +94,8 @@ file_error(struct file_context *fc)
 	return strerror(errno);
 }
 
-/* Compare opened files, including hard links. SMB file indices are
- * meaningful within a volume; copies through other share names or local
- * mount points remain safe because truncation is deferred until EOF. */
+/* SMB file indices alone do not identify a file across volumes. For
+ * unrecognized aliases the copy loop preserves the source through EOF. */
 static int
 same_file(struct file_context *src, struct file_context *dst, int *dst_regular)
 {
@@ -104,27 +103,21 @@ same_file(struct file_context *src, struct file_context *dst, int *dst_regular)
 
 	*dst_regular = 1;
 	if (dst->is_smb2) {
-		struct smb2_stat_64 a, b;
+		const char *src_domain, *dst_domain;
+		const char *src_user, *dst_user;
 
-		if (!src->is_smb2 || strcmp(src->url->server, dst->url->server) ||
-		    strcmp(src->url->share, dst->url->share)) {
+		if (!src->is_smb2) {
 			return 0;
 		}
-		if (src->url->path && dst->url->path &&
-		    !strcmp(src->url->path, dst->url->path)) {
-			return 1;
-		}
-		if (smb2_fstat(src->smb2, src->smb2fh, &a) < 0 || !a.smb2_ino) {
-			return 0;
-		}
-		/* The write handle may lack READ_ATTRIBUTES. Query the path
-		 * with attribute access in that case. Deferred truncation also
-		 * protects aliases when the server denies both queries. */
-		if (smb2_fstat(dst->smb2, dst->smb2fh, &b) < 0 &&
-		    smb2_stat(dst->smb2, dst->url->path, &b) < 0) {
-			return 0;
-		}
-		return a.smb2_ino == b.smb2_ino;
+		src_user = smb2_get_user(src->smb2);
+		dst_user = smb2_get_user(dst->smb2);
+		src_domain = smb2_get_domain(src->smb2);
+		dst_domain = smb2_get_domain(dst->smb2);
+		return src_user && dst_user && !strcmp(src_user, dst_user) &&
+		       !strcmp(src_domain ? src_domain : "", dst_domain ? dst_domain : "") &&
+		       !strcmp(src->url->server, dst->url->server) &&
+		       !strcmp(src->url->share, dst->url->share) &&
+		       src->url->path && dst->url->path && !strcmp(src->url->path, dst->url->path);
 	}
 	if (fstat(dst->fd, &dst_st) < 0) {
 		return -1;
