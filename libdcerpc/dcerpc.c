@@ -2833,6 +2833,16 @@ static void dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
                                           struct dcerpc_pdu *pdu);
 static int dcerpc_read_more_frags(struct dcerpc_context *dce,
                                   struct dcerpc_pdu *pdu);
+
+/* A failed pipe operation cannot complete an RPC successfully, even when
+ * its SMB status (such as EOF) has no corresponding errno. */
+static int
+dcerpc_transport_error(int status)
+{
+        int err = nterror_to_errno(status);
+        return err ? -err : -EIO;
+}
+
 static void
 dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                     void *command_data, void *private_data)
@@ -2854,7 +2864,7 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_error(smb2, "DCERPC fragment READ failed "
                                "(0x%08x) %s", status, nterror_to_str(status));
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status),
+                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status),
                                            NULL);
                 return;
         }
@@ -3042,7 +3052,7 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         }
         if (status != SMB2_STATUS_SUCCESS) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
+                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
                 return;
         }
 
@@ -3318,7 +3328,7 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
                 dcerpc_set_error(dce, "DCERPC fragment WRITE failed "
                                  "(0x%08x) %s", status, nterror_to_str(status));
                 dcerpc_send_pdu_cb_and_free(dce, pdu,
-                                            -nterror_to_errno(status), NULL);
+                                            dcerpc_transport_error(status), NULL);
                 return;
         }
         rc = dcerpc_send_request_frag(dce, pdu);
@@ -3650,7 +3660,7 @@ smb2_bind_cb(struct smb2_context *smb2, int status,
 
         if (status != SMB2_STATUS_SUCCESS) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
+                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
                 return;
         }
 
@@ -4030,10 +4040,7 @@ smb2_open_cb(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_error(smb2, "Failed to open pipe %s: %s",
                                dce->path, nterror_to_str(status));
-                status = -nterror_to_errno(status);
-                if (!status) {
-                        status = -EIO; /* EOF is only a successful result for a read. */
-                }
+                status = dcerpc_transport_error(status);
         } else {
                 memcpy(dce->file_id, rep->file_id, SMB2_FD_SIZE);
                 status = dcerpc_bind_async(dce, data);

@@ -492,6 +492,22 @@ test_signed(int hsign, const uint8_t *req, size_t req_len,
 }
 
 static void
+test_incomplete_reply_eof(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 16);
+        CHECK(cb_done == 0);
+        if (!cb_done) {
+                last_cb(s.smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+        }
+        CHECK(cb_done == 1 && cb_status == -EIO);
+        session_close(&s);
+}
+
+static void
 test_sealed(void)
 {
         static const uint8_t token_hdr[8] = {
@@ -597,6 +613,7 @@ main(void)
                     rep_l5_hsign, sizeof(rep_l5_hsign));
         test_signed(0, req_l5_nohsign, sizeof(req_l5_nohsign),
                     rep_l5_nohsign, sizeof(rep_l5_nohsign));
+        test_incomplete_reply_eof();
         test_sealed();
         test_refused();
         if (failures) {
