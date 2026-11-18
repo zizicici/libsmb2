@@ -2549,11 +2549,16 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
          * reparse points.
          * rmdir() adds SMB2_FILE_DIRECTORY_FILE so the server rejects a
          * plain file outright; without it Samba happily DELETE_ON_CLOSEs
-         * one, and rmdir() deletes arbitrary files.
+         * one, and rmdir() deletes arbitrary files. unlink() adds the
+         * mirror constraint, SMB2_FILE_NON_DIRECTORY_FILE, so it cannot
+         * delete a plain (empty) directory either. Symlinks still work
+         * in both directions: the reparse-point open addresses the link
+         * itself, which is not a directory no matter what it points at.
          */
         cr_req.create_options = SMB2_FILE_DELETE_ON_CLOSE |
                 SMB2_FILE_OPEN_REPARSE_POINT |
-                (is_dir ? SMB2_FILE_DIRECTORY_FILE : 0);
+                (is_dir ? SMB2_FILE_DIRECTORY_FILE
+                        : SMB2_FILE_NON_DIRECTORY_FILE);
         cr_req.name = path;
 
         pdu = smb2_cmd_create_async(smb2, &cr_req, create_cb_1, create_data);
