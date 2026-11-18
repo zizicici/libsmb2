@@ -543,11 +543,12 @@ void smb2_add_active_context(struct smb2_context *smb2)
 
 void smb2_destroy_context(struct smb2_context *smb2)
 {
-        if (smb2 == NULL) {
+        if (smb2 == NULL || smb2->destroying) {
                 return;
         }
 
         /* Shutdown completions cannot wait for more network events. */
+        smb2->destroying = 1;
         smb2->servicing = 1;
         smb2_close_connecting_fds(smb2);
 

@@ -2140,6 +2140,7 @@ struct file_io {
         } args;
 };
 
+static int submit_file_io(struct smb2_context *, struct file_io *);
 static void file_io_done(struct smb2_context *, int, void *, void *);
 
 static int
@@ -2243,7 +2244,7 @@ positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
         }
         io = fh->waiting_close;
         fh->waiting_close = NULL;
-        rc = submit_close(smb2, fh, file_io_done, io);
+        rc = submit_file_io(smb2, io);
         if (rc < 0) {
                 fh->closing = 0;
                 file_io_done(smb2, rc, NULL, io);
@@ -2540,6 +2541,11 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
 {
         struct smb2fh *fh = io->fh;
 
+        /* A shutdown completes the accepted queue locally. Its callers may
+         * already have returned from a failed synchronous transport wait. */
+        if (smb2->destroying || smb2->in_queue_abort) {
+                return -EIO;
+        }
         switch (io->command) {
         case SMB2_READ:
                 io->args.read.offset = io->offset;
