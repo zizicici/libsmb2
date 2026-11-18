@@ -163,6 +163,8 @@ struct sync_cb_data {
 struct smb2_context {
         int servicing;
         int destroying;
+        int destroy_pending;
+        int sync_open_wait; /* holds a caller-owned CREATE until wait cleanup */
 
         t_socket fd;
 
@@ -842,6 +844,7 @@ int smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
 int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
 int smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu);
+void smb2_finish_dispatch(struct smb2_context *smb2);
 int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */

@@ -818,6 +818,7 @@ queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
                         smb2_free_pdu(smb2, pdu);
                 }
                 smb2_close_context(smb2);
+                smb2_finish_dispatch(smb2);
                 return 0;
         }
 
@@ -1326,6 +1327,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                                 smb2_set_error(smb2, "Timed out sending a partial SMB frame");
                                 smb2_close_context(smb2);
                                 smb2->servicing = servicing;
+                                smb2_finish_dispatch(smb2);
                                 return -ETIMEDOUT;
                         }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
@@ -1376,6 +1378,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                 }
         }
         smb2->servicing = servicing;
+        smb2_finish_dispatch(smb2);
         return 0;
 }
 

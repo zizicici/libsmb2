@@ -79,6 +79,9 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <smb2/smb2.h>
 #include <smb2/libsmb2.h>
 #include <smb2/libsmb2-raw.h>
+#ifndef SMB2_HAVE_IS_DISPATCHING
+#define smb2_is_dispatching(smb2) 0
+#endif
 #ifndef SMB2_HAVE_QUEUE_PDU_CHECKED
 /* Standalone builds can use older versions of the libsmb2 transport. */
 static int smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
@@ -1265,7 +1268,9 @@ dcerpc_destroy_context(struct dcerpc_context *dce)
 
 #ifdef HAVE_LIBSMB2
         if (owns_smb2 && smb2) {
-                smb2_disconnect_share(smb2);
+                if (!smb2_is_dispatching(smb2)) {
+                        smb2_disconnect_share(smb2);
+                }
                 smb2_destroy_context(smb2);
         }
 #endif
@@ -3479,19 +3484,17 @@ dcerpc_call_sync_cb(struct dcerpc_context *dce _U_, int status,
 static int
 dcerpc_sync_in_dispatch(struct smb2_context *smb2 _U_)
 {
-#ifdef SMB2_HAVE_IS_DISPATCHING
         if (smb2_is_dispatching(smb2)) {
                 errno = EDEADLK;
                 return 1;
         }
-#endif
         return 0;
 }
 
 static int
-dcerpc_wait_for_reply(struct dcerpc_context *dce, struct dcerpc_sync_cb_data *scb)
+dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
+                      struct dcerpc_sync_cb_data *scb)
 {
-        struct smb2_context *smb2 = dce->smb2;
         struct dcerpc_pending *p;
 
         while (!scb->is_finished) {
@@ -3554,7 +3557,7 @@ dcerpc_call(struct dcerpc_context *dce,
         if (rc != 0) {
                 return NULL;
         }
-        if (dcerpc_wait_for_reply(dce, &scb) != 0) {
+        if (dcerpc_wait_for_reply(dce, smb2, &scb) != 0) {
                 if (scb.ptr) {
                         dcerpc_free_data(dce, scb.ptr);
                 }
@@ -3594,7 +3597,7 @@ dcerpc_connect_context(struct dcerpc_context *dce, const char *path,
         if (rc != 0) {
                 return rc;
         }
-        return dcerpc_wait_for_reply(dce, &scb);
+        return dcerpc_wait_for_reply(dce, smb2, &scb);
 }
 
 static int dcerpc_bind_ack_auth(struct dcerpc_context *dce,

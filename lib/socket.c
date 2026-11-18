@@ -1596,6 +1596,7 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
         smb2->servicing = 1;
         rc = service_fd(smb2, fd, revents);
         smb2->servicing = 0;
+        smb2_finish_dispatch(smb2);
         return rc;
 }
 

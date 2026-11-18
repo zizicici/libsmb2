@@ -93,7 +93,11 @@ static int wait_for_reply(struct smb2_context *smb2,
         time_t t = time(NULL);
 
         while (!cb_data->is_finished) {
-		struct pollfd pfd;
+                struct pollfd pfd;
+
+                if (smb2->destroy_pending) {
+                        return -ECANCELED;
+                }
 		memset(&pfd, 0, sizeof(struct pollfd));
 		pfd.fd = smb2_get_fd(smb2);
 		pfd.events = smb2_which_events(smb2);
@@ -230,6 +234,22 @@ static void sync_open_cb(struct smb2_context *smb2, int status,
         cb_data->ptr = command_data;
 }
 
+static void *
+finish_sync_open(struct smb2_context *smb2, struct smb2_pdu *pdu,
+                 struct sync_cb_data *cb_data)
+{
+        if (pdu) {
+                wait_for_reply(smb2, cb_data);
+                smb2_free_pdu(smb2, pdu);
+        }
+        if (smb2->destroy_pending) {
+                cb_data->ptr = NULL;
+        }
+        smb2->sync_open_wait--;
+        smb2_finish_dispatch(smb2);
+        return cb_data->ptr;
+}
+
 struct smb2dir *smb2_opendir(struct smb2_context *smb2, const char *path)
 {
         struct sync_cb_data cb_data = {0};
@@ -238,14 +258,9 @@ struct smb2dir *smb2_opendir(struct smb2_context *smb2, const char *path)
         if (sync_in_service(smb2)) {
                 return NULL;
         }
+        smb2->sync_open_wait++;
         pdu = smb2_opendir_async_pdu(smb2, path, sync_open_cb, &cb_data, NULL);
-        if (pdu == NULL) {
-                return NULL;
-        }
-        wait_for_reply(smb2, &cb_data);
-        /* Also cancels any later QUERY_DIRECTORY or CLOSE callback. */
-        smb2_free_pdu(smb2, pdu);
-        return cb_data.ptr;
+        return finish_sync_open(smb2, pdu, &cb_data);
 }
 
 struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
@@ -256,14 +271,9 @@ struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
         if (sync_in_service(smb2)) {
                 return NULL;
         }
+        smb2->sync_open_wait++;
         pdu = smb2_open_async_pdu(smb2, path, flags, sync_open_cb, &cb_data, NULL);
-        if (pdu == NULL) {
-                return NULL;
-        }
-        wait_for_reply(smb2, &cb_data);
-        /* Also cancels any later CREATE following a symbolic link. */
-        smb2_free_pdu(smb2, pdu);
-        return cb_data.ptr;
+        return finish_sync_open(smb2, pdu, &cb_data);
 }
 
 /*
