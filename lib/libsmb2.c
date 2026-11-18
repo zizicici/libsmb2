@@ -179,6 +179,8 @@ struct smb2fh {
         uint32_t open_tree_id;
 
         struct file_io *io_head, *io_tail;
+        unsigned pending_positioned;
+        struct file_io *waiting_close;
         int closing;
         /* Set while the preceding callback can re-enter this queue. */
         int *resume_io;
@@ -2293,6 +2295,24 @@ submit_fsync(struct smb2_context *smb2, struct smb2fh *fh,
         return 0;
 }
 
+static void
+positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
+{
+        struct file_io *io;
+        int rc;
+
+        if (--fh->pending_positioned || !fh->waiting_close) {
+                return;
+        }
+        io = fh->waiting_close;
+        fh->waiting_close = NULL;
+        rc = submit_close(smb2, fh, file_io_done, io);
+        if (rc < 0) {
+                fh->closing = 0;
+                file_io_done(smb2, rc, NULL, io);
+        }
+}
+
 struct read_data {
         smb2_command_cb cb;
         void *cb_data;
@@ -2303,37 +2323,34 @@ struct read_data {
 
 static void
 read_cb(struct smb2_context *smb2, int status,
-      void *command_data, void *private_data)
+        void *command_data, void *private_data)
 {
         struct read_data *rd = private_data;
         struct smb2_read_reply *rep = command_data;
+        struct smb2fh *fh = rd->read_cb_data.fh;
+        int positioned = rd->cb != file_io_done;
+        int result;
 
         if (status == SMB2_STATUS_PENDING) {
                 return;
         }
-
-        if (status && status != SMB2_STATUS_END_OF_FILE) {
-                smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
-                               status, nterror_to_str(status));
-                rd->cb(smb2, -nterror_to_errno(status), &rd->read_cb_data, rd->cb_data);
-                free(rd);
-                return;
-        }
-
         if (status == SMB2_STATUS_END_OF_FILE) {
-                /* The payload is an error reply, not a read reply */
-                rd->cb(smb2, 0, &rd->read_cb_data, rd->cb_data);
-                free(rd);
-                return;
+                result = 0;
+        } else if (status) {
+                smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
+                                 status, nterror_to_str(status));
+                result = -nterror_to_errno(status);
+        } else {
+                result = rep->data_length;
+                if (positioned && rd->seek_generation == fh->seek_generation) {
+                        fh->offset = rd->read_cb_data.offset + rep->data_length;
+                }
         }
-
-        if (rd->cb != file_io_done &&
-            rd->seek_generation == rd->read_cb_data.fh->seek_generation) {
-                rd->read_cb_data.fh->offset = rd->read_cb_data.offset + rep->data_length;
-        }
-
-        rd->cb(smb2, rep->data_length, &rd->read_cb_data, rd->cb_data);
+        rd->cb(smb2, result, &rd->read_cb_data, rd->cb_data);
         free(rd);
+        if (positioned) {
+                positioned_io_done(smb2, fh);
+        }
 }
 
 int
@@ -2352,6 +2369,10 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
         if (fh == NULL) {
                 smb2_set_error(smb2, "File handle was NULL");
                 return -EINVAL;
+        }
+
+        if (fh->closing && cb != file_io_done) {
+                return -EBADF;
         }
 
         rd = calloc(1, sizeof(struct read_data));
@@ -2416,7 +2437,14 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                 return -EINVAL;
         }
 
+        if (cb != file_io_done) {
+                fh->pending_positioned++;
+                smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
+        }
         if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
+                if (cb != file_io_done) {
+                        positioned_io_done(smb2, fh);
+                }
                 free(rd);
                 return -EIO;
         }
@@ -2436,50 +2464,38 @@ struct write_data {
 
 static void
 write_cb(struct smb2_context *smb2, int status,
-      void *command_data, void *private_data)
+        void *command_data, void *private_data)
 {
         struct write_data *wd = private_data;
         struct smb2_write_reply *rep = command_data;
+        struct smb2fh *fh = wd->write_cb_data.fh;
+        int positioned = wd->cb != file_io_done;
+        int result;
 
         if (status == SMB2_STATUS_PENDING) {
                 return;
         }
-
-        if (status && status != SMB2_STATUS_END_OF_FILE) {
-                smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
-                               status, nterror_to_str(status));
-                wd->cb(smb2, -nterror_to_errno(status), &wd->write_cb_data, wd->cb_data);
-                free(wd);
-                return;
-        }
-
         if (status == SMB2_STATUS_END_OF_FILE) {
-                /* The payload is an error reply, not a write reply */
-                wd->cb(smb2, 0, &wd->write_cb_data, wd->cb_data);
-                free(wd);
-                return;
+                result = 0;
+        } else if (status) {
+                smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
+                                 status, nterror_to_str(status));
+                result = -nterror_to_errno(status);
+        } else if (rep->count > wd->sent) {
+                smb2_set_error(smb2, "Write reply counted %u bytes, %u were sent",
+                               rep->count, wd->sent);
+                result = -EIO;
+        } else {
+                result = rep->count;
+                if (positioned && wd->seek_generation == fh->seek_generation) {
+                        fh->offset = wd->write_cb_data.offset + rep->count;
+                }
         }
-
-        /*
-         * rep->count advances the file offset. A reply above the bytes
-         * queued skips the tail of a sequential write.
-         */
-        if (rep != NULL && rep->count > wd->sent) {
-                smb2_set_error(smb2, "Write reply counted %u bytes, "
-                               "%u were sent", rep->count,
-                               wd->sent);
-                wd->cb(smb2, -EIO, &wd->write_cb_data, wd->cb_data);
-                free(wd);
-                return;
-        }
-
-        if (wd->cb != file_io_done &&
-            wd->seek_generation == wd->write_cb_data.fh->seek_generation) {
-                wd->write_cb_data.fh->offset = wd->write_cb_data.offset + rep->count;
-        }
-
-        wd->cb(smb2, rep->count, &wd->write_cb_data, wd->cb_data);
+        wd->cb(smb2, result, &wd->write_cb_data, wd->cb_data);
         free(wd);
+        if (positioned) {
+                positioned_io_done(smb2, fh);
+        }
 }
 
 int
@@ -2498,6 +2514,10 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         if (fh == NULL) {
                 smb2_set_error(smb2, "File handle was NULL");
                 return -EINVAL;
+        }
+
+        if (fh->closing && cb != file_io_done) {
+                return -EBADF;
         }
 
         wr = calloc(1, sizeof(struct write_data));
@@ -2567,7 +2587,14 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                 free(wr);
                 return -EINVAL;
         }
+        if (cb != file_io_done) {
+                fh->pending_positioned++;
+                smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
+        }
         if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
+                if (cb != file_io_done) {
+                        positioned_io_done(smb2, fh);
+                }
                 free(wr);
                 return -EIO;
         }
@@ -2594,6 +2621,10 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         case SMB2_FLUSH:
                 return submit_fsync(smb2, fh, file_io_done, io);
         case SMB2_CLOSE:
+                if (fh->pending_positioned) {
+                        fh->waiting_close = io;
+                        return 0;
+                }
                 return submit_close(smb2, fh, file_io_done, io);
         default:
                 return -EINVAL;

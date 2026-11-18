@@ -4,6 +4,7 @@
 #endif
 #undef NDEBUG
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <string.h>
@@ -242,6 +243,30 @@ static void seek_during_positioned_io(struct smb2_context *smb2)
         assert(calls.completed == 2);
 }
 
+static void close_after_positioned_io(struct smb2_context *smb2)
+{
+        struct callbacks calls = {0};
+        struct smb2_write_reply written = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        uint8_t byte = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        assert(!smb2_pwrite_async(smb2, fh, &byte, 1, 0, completed, &calls));
+        assert(!smb2_pread_async(smb2, fh, &byte, 1, 0, completed, &calls));
+        assert(!smb2_close_async(smb2, fh, completed, &calls));
+        assert(smb2_pread_async(smb2, fh, &byte, 1, 0, completed, &calls) == -EBADF);
+        assert(smb2->waitqueue->next && !smb2->waitqueue->next->next);
+        written.count = 1;
+        reply(smb2, SMB2_WRITE, 0, &written);
+        assert(calls.completed == 1 && !smb2->waitqueue->next);
+        reply(smb2, SMB2_READ, SMB2_STATUS_END_OF_FILE, NULL);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(calls.completed == 3);
+}
+
 static void disconnect_during_copy(struct smb2_context *smb2, int peer)
 {
         struct smb2_srv_copychunk_resume_key key = {0};
@@ -291,6 +316,7 @@ int main(void)
         watch_across_tree_switch(smb2);
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
+        close_after_positioned_io(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);
