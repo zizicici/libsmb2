@@ -2131,6 +2131,8 @@ struct file_io {
         enum smb2_command command;
         uint64_t offset, seek_generation;
         uint32_t tree_id;
+        uint32_t sent; /* On-wire write length, after applying credit limits. */
+        int positioned;
         smb2_command_cb cb;
         void *cb_data;
         union {
@@ -2141,16 +2143,12 @@ struct file_io {
 };
 
 static int submit_file_io(struct smb2_context *, struct file_io *);
-static void file_io_done(struct smb2_context *, int, void *, void *);
+static void file_io_done(struct smb2_context *, struct file_io *, int, void *);
 
 static int
-queue_io_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu,
-             smb2_command_cb cb, void *cb_data)
+queue_io_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, struct file_io *io)
 {
-        if (cb == file_io_done) {
-                struct file_io *io = cb_data;
-                smb2_set_tree_id_for_pdu(smb2, pdu, io->tree_id);
-        }
+        smb2_set_tree_id_for_pdu(smb2, pdu, io->tree_id);
         return smb2_queue_pdu_final(smb2, pdu);
 }
 
@@ -2158,53 +2156,31 @@ static void
 close_cb(struct smb2_context *smb2, int status,
          void *command_data, void *private_data)
 {
-        struct smb2fh *fh = private_data;
-
+        struct file_io *io = private_data;
+        struct smb2fh *fh = io->fh;
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
-                               status, nterror_to_str(status));
-                fh->cb(smb2, -nterror_to_errno(status), NULL, fh->cb_data);
-                free_smb2fh(smb2, fh);
-                return;
+                                 status, nterror_to_str(status));
         }
-
-        fh->cb(smb2, 0, NULL, fh->cb_data);
+        file_io_done(smb2, io, -nterror_to_errno(status), NULL);
         free_smb2fh(smb2, fh);
 }
 
 static int
-submit_close(struct smb2_context *smb2, struct smb2fh *fh,
-                 smb2_command_cb cb, void *cb_data)
+submit_close(struct smb2_context *smb2, struct file_io *io)
 {
-        struct smb2_close_request req;
+        struct smb2_close_request req = {0};
         struct smb2_pdu *pdu;
 
-        if (smb2 == NULL) {
-            return -EINVAL;
-        }
-        if (fh == NULL) {
-            smb2_set_error(smb2, "File handle was NULL");
-            return -EINVAL;
-        }
-
-        fh->cb = cb;
-        fh->cb_data = cb_data;
-
-        memset(&req, 0, sizeof(struct smb2_close_request));
         req.flags = SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB;
-        memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
-
-        pdu = smb2_cmd_close_async(smb2, &req, close_cb, fh);
+        memcpy(req.file_id, io->fh->file_id, SMB2_FD_SIZE);
+        pdu = smb2_cmd_close_async(smb2, &req, close_cb, io);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create close command");
                 return -ENOMEM;
         }
-        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
-                return -EIO;
-        }
-
-        return 0;
+        return queue_io_pdu(smb2, pdu, io) < 0 ? -EIO : 0;
 }
 
 static void
@@ -2215,7 +2191,7 @@ fsync_cb(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, status, "Flush failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
         }
-        file_io_done(smb2, -nterror_to_errno(status), NULL, private_data);
+        file_io_done(smb2, private_data, -nterror_to_errno(status), NULL);
 }
 
 static int
@@ -2230,7 +2206,7 @@ submit_fsync(struct smb2_context *smb2, struct file_io *io)
                 smb2_set_error(smb2, "Failed to create flush command");
                 return -ENOMEM;
         }
-        return queue_io_pdu(smb2, pdu, file_io_done, io);
+        return queue_io_pdu(smb2, pdu, io);
 }
 
 static void
@@ -2247,7 +2223,7 @@ positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
         rc = submit_file_io(smb2, io);
         if (rc < 0) {
                 fh->closing = 0;
-                file_io_done(smb2, rc, NULL, io);
+                file_io_done(smb2, io, rc, NULL);
         }
 }
 
@@ -2268,219 +2244,89 @@ file_io_length(struct smb2_context *smb2, uint32_t count, uint32_t negotiated_ma
         return MIN(count, credits * 65536U);
 }
 
-struct read_data {
-        smb2_command_cb cb;
-        void *cb_data;
-
-        uint64_t seek_generation;
-        struct smb2_read_cb_data read_cb_data;
-};
-
 static void
-read_cb(struct smb2_context *smb2, int status,
-        void *command_data, void *private_data)
+read_write_cb(struct smb2_context *smb2, int status, void *reply, void *private_data)
 {
-        struct read_data *rd = private_data;
-        struct smb2_read_reply *rep = command_data;
-        struct smb2fh *fh = rd->read_cb_data.fh;
-        int positioned = rd->cb != file_io_done;
+        struct file_io *io = private_data;
+        struct smb2fh *fh = io->fh;
+        void *args;
         int result;
 
+        if (io->command == SMB2_READ) {
+                args = &io->args.read;
+        } else {
+                args = &io->args.write;
+        }
         if (status == SMB2_STATUS_END_OF_FILE) {
                 result = 0;
-        } else if (status) {
+        } else if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
                 result = -nterror_to_errno(status);
+        } else if (io->command == SMB2_READ) {
+                struct smb2_read_reply *read = reply;
+                result = read->data_length;
         } else {
-                result = rep->data_length;
-                if (positioned && rd->seek_generation == fh->seek_generation) {
-                        fh->offset = rd->read_cb_data.offset + rep->data_length;
+                struct smb2_write_reply *write = reply;
+                if (write->count > io->sent) {
+                        smb2_set_error(smb2, "Write reply counted %u bytes, %u were sent",
+                                       write->count, io->sent);
+                        result = -EIO;
+                } else {
+                        result = write->count;
                 }
         }
-        rd->cb(smb2, result, &rd->read_cb_data, rd->cb_data);
-        free(rd);
-        if (positioned) {
-                positioned_io_done(smb2, fh);
+        if (!io->positioned) {
+                file_io_done(smb2, io, result, args);
+                return;
         }
+        if (status == SMB2_STATUS_SUCCESS && result >= 0 &&
+            io->seek_generation == fh->seek_generation) {
+                fh->offset = io->offset + (uint32_t)result;
+        }
+        io->cb(smb2, result, args, io->cb_data);
+        free(io);
+        positioned_io_done(smb2, fh);
 }
 
-int
-smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
-                 uint8_t *buf, uint32_t count, uint64_t offset,
-                 smb2_command_cb cb, void *cb_data)
+static int
+submit_read_write(struct smb2_context *smb2, struct file_io *io)
 {
-        struct smb2_read_request req;
-        struct read_data *rd;
+        struct smb2fh *fh = io->fh;
         struct smb2_pdu *pdu;
 
-        if (smb2 == NULL) {
-                return -EINVAL;
-        }
-        if (fh == NULL) {
-                smb2_set_error(smb2, "File handle was NULL");
-                return -EINVAL;
-        }
-
-        if (fh->closing && cb != file_io_done) {
-                return -EBADF;
-        }
-
-        rd = calloc(1, sizeof(struct read_data));
-        if (rd == NULL) {
-                smb2_set_error(smb2, "Failed to allocate read_data");
-                return -ENOMEM;
-        }
-
-        rd->cb = cb;
-        rd->cb_data = cb_data;
-        rd->seek_generation = fh->seek_generation;
-        rd->read_cb_data.fh = fh;
-        rd->read_cb_data.buf = buf;
-        rd->read_cb_data.count = count;
-        rd->read_cb_data.offset = offset;
-
-        count = file_io_length(smb2, count, smb2->max_read_size);
-        memset(&req, 0, sizeof(struct smb2_read_request));
-        req.flags = 0;
-        req.length = count;
-        req.offset = offset;
-        req.buf = buf;
-        memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
-        req.minimum_count = 0;
-        req.channel = SMB2_CHANNEL_NONE;
-        req.remaining_bytes = 0;
-
-        pdu = smb2_cmd_read_async(smb2, &req, read_cb, rd);
-        if (pdu == NULL) {
-                smb2_set_error(smb2, "Failed to create read command");
-                free(rd);
-                return -EINVAL;
-        }
-
-        if (cb != file_io_done) {
-                fh->pending_positioned++;
-                smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
-        }
-        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
-                if (cb != file_io_done) {
-                        positioned_io_done(smb2, fh);
-                }
-                free(rd);
-                return -EIO;
-        }
-
-        return 0;
-}
-
-struct write_data {
-        smb2_command_cb cb;
-        void *cb_data;
-
-        uint64_t seek_generation;
-        struct smb2_write_cb_data write_cb_data;
-        /* Bytes queued. write_cb_data.count stays the caller's length. */
-        uint32_t sent;
-};
-
-static void
-write_cb(struct smb2_context *smb2, int status,
-        void *command_data, void *private_data)
-{
-        struct write_data *wd = private_data;
-        struct smb2_write_reply *rep = command_data;
-        struct smb2fh *fh = wd->write_cb_data.fh;
-        int positioned = wd->cb != file_io_done;
-        int result;
-
-        if (status == SMB2_STATUS_END_OF_FILE) {
-                result = 0;
-        } else if (status) {
-                smb2_set_nterror(smb2, status, "Read/Write failed with (0x%08x) %s",
-                                 status, nterror_to_str(status));
-                result = -nterror_to_errno(status);
-        } else if (rep->count > wd->sent) {
-                smb2_set_error(smb2, "Write reply counted %u bytes, %u were sent",
-                               rep->count, wd->sent);
-                result = -EIO;
+        if (io->command == SMB2_READ) {
+                struct smb2_read_request req = {0};
+                io->args.read.offset = io->offset;
+                req.offset = io->offset;
+                req.buf = io->args.read.buf;
+                req.length = file_io_length(smb2, io->args.read.count, smb2->max_read_size);
+                memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
+                pdu = smb2_cmd_read_async(smb2, &req, read_write_cb, io);
         } else {
-                result = rep->count;
-                if (positioned && wd->seek_generation == fh->seek_generation) {
-                        fh->offset = wd->write_cb_data.offset + rep->count;
-                }
+                struct smb2_write_request req = {0};
+                io->args.write.offset = io->offset;
+                req.offset = io->offset;
+                req.buf = io->args.write.buf;
+                req.length = file_io_length(smb2, io->args.write.count, smb2->max_write_size);
+                io->sent = req.length;
+                memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
+                pdu = smb2_cmd_write_async(smb2, &req, 0, read_write_cb, io);
         }
-        wd->cb(smb2, result, &wd->write_cb_data, wd->cb_data);
-        free(wd);
-        if (positioned) {
-                positioned_io_done(smb2, fh);
-        }
-}
-
-int
-smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
-                  const uint8_t *buf, uint32_t count, uint64_t offset,
-                  smb2_command_cb cb, void *cb_data)
-{
-        struct smb2_write_request req;
-        struct write_data *wr;
-        struct smb2_pdu *pdu;
-
-        if (smb2 == NULL) {
-                return -EINVAL;
-        }
-        if (fh == NULL) {
-                smb2_set_error(smb2, "File handle was NULL");
-                return -EINVAL;
-        }
-
-        if (fh->closing && cb != file_io_done) {
-                return -EBADF;
-        }
-
-        wr = calloc(1, sizeof(struct write_data));
-        if (wr == NULL) {
-                smb2_set_error(smb2, "Failed to allocate write_data");
-                return -ENOMEM;
-        }
-
-        wr->cb = cb;
-        wr->cb_data = cb_data;
-        wr->seek_generation = fh->seek_generation;
-        wr->write_cb_data.fh = fh;
-        wr->write_cb_data.buf = buf;
-        wr->write_cb_data.count = count;
-        wr->write_cb_data.offset = offset;
-
-        count = file_io_length(smb2, count, smb2->max_write_size);
-        wr->sent = count;
-
-        memset(&req, 0, sizeof(struct smb2_write_request));
-        req.length = count;
-        req.offset = offset;
-        req.buf = buf;
-        memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
-        req.channel = SMB2_CHANNEL_NONE;
-        req.remaining_bytes = 0;
-        req.flags = 0;
-
-        pdu = smb2_cmd_write_async(smb2, &req, 0, write_cb, wr);
         if (pdu == NULL) {
-                smb2_set_error(smb2, "Failed to create write command");
-                free(wr);
+                smb2_set_error(smb2, "Failed to create %s command",
+                               io->command == SMB2_READ ? "read" : "write");
                 return -EINVAL;
         }
-        if (cb != file_io_done) {
+        if (io->positioned) {
                 fh->pending_positioned++;
-                smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
         }
-        if (queue_io_pdu(smb2, pdu, cb, cb_data) < 0) {
-                if (cb != file_io_done) {
+        if (queue_io_pdu(smb2, pdu, io) < 0) {
+                if (io->positioned) {
                         positioned_io_done(smb2, fh);
                 }
-                free(wr);
                 return -EIO;
         }
-
         return 0;
 }
 
@@ -2498,15 +2344,8 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         }
         switch (io->command) {
         case SMB2_READ:
-                io->args.read.offset = io->offset;
-                return smb2_pread_async(smb2, fh, io->args.read.buf,
-                                        io->args.read.count, io->offset,
-                                        file_io_done, io);
         case SMB2_WRITE:
-                io->args.write.offset = io->offset;
-                return smb2_pwrite_async(smb2, fh, io->args.write.buf,
-                                         io->args.write.count, io->offset,
-                                         file_io_done, io);
+                return submit_read_write(smb2, io);
         case SMB2_SET_INFO:
                 return submit_ftruncate(smb2, io);
         case SMB2_FLUSH:
@@ -2516,16 +2355,15 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
                         fh->waiting_close = io;
                         return 0;
                 }
-                return submit_close(smb2, fh, file_io_done, io);
+                return submit_close(smb2, io);
         default:
                 return -EINVAL;
         }
 }
 
 static void
-file_io_done(struct smb2_context *smb2, int status, void *reply, void *private_data)
+file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *reply)
 {
-        struct file_io *io = private_data;
         struct smb2fh *fh = io->fh;
 
         for (;;) {
@@ -2569,14 +2407,20 @@ file_io_done(struct smb2_context *smb2, int status, void *reply, void *private_d
 }
 
 static int
-queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
-              enum smb2_command command, void *buf, uint32_t count,
+start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command command,
+              void *buf, uint32_t count, const uint64_t *position,
               smb2_command_cb cb, void *cb_data)
 {
         struct file_io *io;
         int rc;
 
-        if (smb2 == NULL || fh == NULL || (count && buf == NULL)) {
+        if (smb2 == NULL || (!position && count && buf == NULL)) {
+                return -EINVAL;
+        }
+        if (fh == NULL) {
+                if (position) {
+                        smb2_set_error(smb2, "File handle was NULL");
+                }
                 return -EINVAL;
         }
         if (fh->closing) {
@@ -2588,7 +2432,8 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         }
         io->fh = fh;
         io->command = command;
-        io->offset = fh->offset;
+        io->positioned = position != NULL;
+        io->offset = position ? *position : (uint64_t)fh->offset;
         io->seek_generation = fh->seek_generation;
         io->tree_id = file_handle_tree_id(smb2, fh);
         io->cb = cb;
@@ -2606,6 +2451,13 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         } else if (command == SMB2_CLOSE) {
                 fh->closing = 1;
         }
+        if (io->positioned) {
+                rc = submit_read_write(smb2, io);
+                if (rc < 0) {
+                        free(io);
+                }
+                return rc;
+        }
         if (fh->io_tail) {
                 fh->io_tail->next = io;
                 fh->io_tail = io;
@@ -2622,31 +2474,47 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
 }
 
 int
+smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
+                 uint8_t *buf, uint32_t count, uint64_t offset,
+                 smb2_command_cb cb, void *cb_data)
+{
+        return start_file_io(smb2, fh, SMB2_READ, buf, count, &offset, cb, cb_data);
+}
+
+int
+smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
+                  const uint8_t *buf, uint32_t count, uint64_t offset,
+                  smb2_command_cb cb, void *cb_data)
+{
+        return start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, &offset, cb, cb_data);
+}
+
+int
 smb2_read_async(struct smb2_context *smb2, struct smb2fh *fh,
                 uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
 {
-        return queue_file_io(smb2, fh, SMB2_READ, buf, count, cb, cb_data);
+        return start_file_io(smb2, fh, SMB2_READ, buf, count, NULL, cb, cb_data);
 }
 
 int
 smb2_write_async(struct smb2_context *smb2, struct smb2fh *fh,
                  const uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
 {
-        return queue_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, cb, cb_data);
+        return start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, NULL, cb, cb_data);
 }
 
 int
 smb2_fsync_async(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
-        return queue_file_io(smb2, fh, SMB2_FLUSH, NULL, 0, cb, cb_data);
+        return start_file_io(smb2, fh, SMB2_FLUSH, NULL, 0, NULL, cb, cb_data);
 }
 
 int
 smb2_close_async(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
-        return queue_file_io(smb2, fh, SMB2_CLOSE, NULL, 0, cb, cb_data);
+        return start_file_io(smb2, fh, SMB2_CLOSE, NULL, 0, NULL, cb, cb_data);
 }
 
 int64_t
@@ -3728,7 +3596,7 @@ ftruncate_cb(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, status, "Truncate failed with "
                                  "(0x%08x) %s", status, nterror_to_str(status));
         }
-        file_io_done(smb2, -nterror_to_errno(status), NULL, private_data);
+        file_io_done(smb2, private_data, -nterror_to_errno(status), NULL);
 }
 
 static int
@@ -3753,14 +3621,14 @@ submit_ftruncate(struct smb2_context *smb2, struct file_io *io)
                 smb2_set_error(smb2, "Failed to create set info command");
                 return -ENOMEM;
         }
-        return queue_io_pdu(smb2, pdu, file_io_done, io);
+        return queue_io_pdu(smb2, pdu, io);
 }
 
 int
 smb2_ftruncate_async(struct smb2_context *smb2, struct smb2fh *fh,
                      uint64_t length, smb2_command_cb cb, void *cb_data)
 {
-        return queue_file_io(smb2, fh, SMB2_SET_INFO, &length, 0, cb, cb_data);
+        return start_file_io(smb2, fh, SMB2_SET_INFO, &length, 0, NULL, cb, cb_data);
 }
 
 struct symlink_cb_data {
