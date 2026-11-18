@@ -33,13 +33,6 @@
 #include <stdlib.h>
 #endif
 
-#ifdef _WIN32
-/* WIN32_LEAN_AND_MEAN (always set by the build) keeps windows.h from
- * pulling in winsock.h ahead of compat.h's winsock2.h. */
-#include <windows.h>
-#include <bcrypt.h>
-#endif
-
 #ifdef HAVE_STRING_H
 #include <string.h>
 #endif
@@ -88,6 +81,10 @@
 #endif
 
 #include "compat.h"
+
+#ifdef _WIN32
+#include <bcrypt.h>
+#endif
 
 #include "smb2.h"
 #include "libsmb2.h"
