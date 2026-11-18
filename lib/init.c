@@ -45,6 +45,7 @@
 #include <sys/unistd.h>
 #endif
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -82,8 +83,32 @@
 
 #include "compat.h"
 
-#ifdef _WIN32
+#ifdef HAVE_OPENSSL
+#include <openssl/rand.h>
+#endif
+
+#if defined(_WIN32) && !defined(_XBOX) && !defined(_WIN32_WCE)
 #include <bcrypt.h>
+#elif defined(__SWITCH__)
+#include <switch/result.h>
+#include <switch/services/csrng.h>
+#elif defined(__3DS__)
+#include <3ds/types.h>
+#include <3ds/result.h>
+#include <3ds/services/ps.h>
+#elif defined(ESP_PLATFORM)
+#include <esp_idf_version.h>
+#include <sdkconfig.h>
+#if defined(CONFIG_ESP_WIFI_ENABLED) || defined(CONFIG_ESP32_WIFI_ENABLED)
+/* The Wi-Fi RF wake lock was introduced in these SDK maintenance releases. */
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 2) || \
+    (ESP_IDF_VERSION_MAJOR == 5 && ESP_IDF_VERSION_MINOR == 0 && ESP_IDF_VERSION_PATCH >= 6) || \
+    (ESP_IDF_VERSION_MAJOR == 4 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 7))
+#define SMB2_ESP_WIFI_RANDOM 1
+#include <esp_random.h>
+#include <esp_wifi.h>
+#endif
+#endif
 #endif
 
 #include "smb2.h"
@@ -327,128 +352,145 @@ void smb2_destroy_url(struct smb2_url *url)
 }
 
 
-/*
- * Fill buf with len random bytes.
- *
- * Several of the values libsmb2 generates - the NTLMv2 client challenge,
- * the SMB 3.1.1 preauth salt and above all the AES-CCM nonce - are only
- * worth anything if an attacker can not predict them. A repeated or
- * predicted CCM nonce under a given key breaks both the confidentiality
- * and the integrity of the sealed traffic, so use a real CSPRNG where the
- * platform has one.
- *
- * Not all of the platforms libsmb2 supports have one, so every strong
- * source is optional and we always fall back to the random() based
- * sequence rather than failing. Returns 0 when the bytes came from a
- * strong source and -1 when the fallback was used.
- *
- * On Linux, getrandom() with flags 0 blocks until the CRNG is seeded,
- * and glibc arc4random_buf() calls it that way. smb2_init_context()
- * would then hang at early boot, and the /dev/urandom fallback below
- * would never run. Use GRND_NONBLOCK there, and prefer that chain over
- * arc4random_buf().
- */
+/* Set during application startup, before the first context is used. */
+static smb2_random_provider random_provider;
+
+void
+smb2_set_random_provider(smb2_random_provider provider)
+{
+        random_provider = provider;
+}
+
 int
 smb2_random_bytes(void *buf, size_t len)
 {
         uint8_t *p = buf;
 
-#ifdef _WIN32
-        /*
-         * The system-preferred CSPRNG needs no algorithm handle on Vista
-         * and later. Without this branch Windows has no strong source at
-         * all and would fall through to the seeded random() sequence —
-         * and return -1, which since the nonce check fails every sealed
-         * send outright.
-         */
-        if (BCRYPT_SUCCESS(BCryptGenRandom(
-                    NULL, p, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        if (random_provider) {
+                int err = random_provider(p, len);
+                if (err) {
+                        errno = err;
+                        return -1;
+                }
+                return 0;
+        }
+#if defined(_WIN32) && !defined(_XBOX) && !defined(_WIN32_WCE)
+        while (len) {
+                ULONG n = len > ULONG_MAX ? ULONG_MAX : (ULONG)len;
+                if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, p, n,
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+                        errno = EIO;
+                        return -1;
+                }
+                p += n;
+                len -= n;
+        }
+        return 0;
+#elif defined(SMB2_ESP_WIFI_RANDOM)
+        /* Keep RF entropy enabled for the entire hardware RNG read. */
+        if (esp_wifi_force_wakeup_acquire() != ESP_OK) {
+                errno = EAGAIN;
+                return -1;
+        }
+        esp_fill_random(p, len);
+        if (esp_wifi_force_wakeup_release() != ESP_OK) {
+                errno = EIO;
+                return -1;
+        }
+        return 0;
+#elif defined(__amigaos4__)
+        return smb2_amiga_random_bytes(p, len);
+#elif defined(__SWITCH__) || defined(__3DS__)
+        {
+                Result rc;
+#ifdef __SWITCH__
+                rc = csrngInitialize();
+                if (R_SUCCEEDED(rc)) {
+                        rc = csrngGetRandomBytes(p, len);
+                        csrngExit();
+                }
+#else
+                rc = psInit();
+                if (R_SUCCEEDED(rc)) {
+                        rc = PS_GenerateRandomBytes(p, len);
+                        psExit();
+                }
+#endif
+                if (R_FAILED(rc)) {
+                        errno = EIO;
+                        return -1;
+                }
+                return 0;
+        }
+#elif defined(HAVE_ARC4RANDOM_BUF) && \
+        !(defined(__linux__) && (defined(HAVE_GETRANDOM) || defined(HAVE_DEV_URANDOM)))
+        arc4random_buf(p, len);
+        return 0;
+#else
+#ifdef HAVE_GETRANDOM
+        while (len) {
+                /* Fail promptly while the Linux kernel is still seeding. */
+                ssize_t n = getrandom(p, len,
+#ifdef GRND_NONBLOCK
+                                      GRND_NONBLOCK
+#else
+                                      0
+#endif
+                );
+                if (n > 0) {
+                        p += n;
+                        len -= n;
+                } else if (n == 0) {
+                        errno = EIO;
+                        return -1;
+                } else if (errno != EINTR) {
+#ifdef HAVE_DEV_URANDOM
+                        if (errno == ENOSYS || errno == EPERM) {
+                                break;
+                        }
+#endif
+                        return -1;
+                }
+        }
+        if (!len) {
                 return 0;
         }
 #endif
-
-#if defined(HAVE_ARC4RANDOM_BUF) && \
-        !(defined(__linux__) && (defined(HAVE_GETRANDOM) || \
-                                 defined(HAVE_DEV_URANDOM)))
-        arc4random_buf(p, len);
-        return 0;
-#else /* !HAVE_ARC4RANDOM_BUF, or Linux with getrandom or urandom */
-
-#ifdef HAVE_GETRANDOM
-        {
-                size_t done = 0;
-                unsigned int flags = 0;
-
-#ifdef GRND_NONBLOCK
-                flags = GRND_NONBLOCK;
-#endif
-                while (done < len) {
-                        ssize_t count = getrandom(p + done, len - done, flags);
-
-                        if (count < 0) {
-                                if (errno == EINTR) {
-                                        continue;
-                                }
-                                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                        /* The CRNG is not seeded yet (early
-                                         * boot). Fail rather than degrade to
-                                         * an unseeded /dev/urandom: callers
-                                         * use this for challenges and
-                                         * encryption nonces and should
-                                         * retry later. */
-                                        errno = EAGAIN;
-                                        return -1;
-                                }
-                                break;
-                        }
-                        done += (size_t)count;
-                }
-                if (done == len) {
-                        return 0;
-                }
-        }
-#endif /* HAVE_GETRANDOM */
-
 #ifdef HAVE_DEV_URANDOM
         {
                 int fd = open("/dev/urandom", O_RDONLY);
-
-                if (fd != -1) {
-                        size_t done = 0;
-
-                        while (done < len) {
-                                ssize_t count = read(fd, p + done, len - done);
-
-                                if (count <= 0) {
-                                        if (count < 0 && errno == EINTR) {
-                                                continue;
-                                        }
-                                        break;
-                                }
-                                done += (size_t)count;
-                        }
-                        close(fd);
-                        if (done == len) {
-                                return 0;
+                int err = 0;
+                if (fd < 0) {
+                        return -1;
+                }
+                while (len) {
+                        ssize_t n = read(fd, p, len);
+                        if (n > 0) {
+                                p += n;
+                                len -= n;
+                        } else if (n == 0 || errno != EINTR) {
+                                err = n == 0 ? EIO : errno;
+                                break;
                         }
                 }
-        }
-#endif /* HAVE_DEV_URANDOM */
-
-        /*
-         * Either this platform has no strong source or the one it has
-         * failed at runtime. Fall back to the random() sequence seeded in
-         * smb2_init_context().
-         */
-        {
-                size_t i;
-
-                for (i = 0; i < len; i++) {
-                        p[i] = random() & 0xff;
+                close(fd);
+                if (err) {
+                        errno = err;
+                        return -1;
                 }
+                return 0;
         }
+#elif defined(HAVE_OPENSSL)
+        if (RAND_bytes_ex(NULL, p, len, 0) == 1) {
+                return 0;
+        }
+        errno = EIO;
         return -1;
-#endif /* !HAVE_ARC4RANDOM_BUF, or Linux with getrandom or urandom */
+#else
+        errno = ENOSYS;
+        return -1;
+#endif
+#endif
 }
 
 struct smb2_context *smb2_init_context(void)
@@ -459,13 +501,9 @@ struct smb2_context *smb2_init_context(void)
 
         smb2 = calloc(1, sizeof(struct smb2_context));
         if (smb2 == NULL) {
+                errno = ENOMEM;
                 return NULL;
         }
-        /* Only seeds the fallback path in smb2_random_bytes(). The context's
-         * address tells contexts apart without a counter that threads
-         * creating contexts at once would race on. */
-        srandom((unsigned)time(NULL) ^ getpid() ^ (unsigned)(uintptr_t)smb2);
-
         ret = getlogin_r(buf, sizeof(buf));
         smb2_set_user(smb2, ret == 0 ? buf : "Guest");
         smb2->fd = SMB2_INVALID_SOCKET;
@@ -481,12 +519,9 @@ struct smb2_context *smb2_init_context(void)
                               sizeof(smb2->client_challenge)) ||
             smb2_random_bytes(smb2->salt, sizeof(smb2->salt)) ||
             smb2_random_bytes(smb2->client_guid, sizeof(smb2->client_guid))) {
-                /* E.g. getrandom() reporting the CRNG is not seeded yet:
-                 * the buffers stayed zeroed and would never be redrawn.
-                 * Fail the whole context so the caller retries later. */
-                smb2_set_error(smb2, "Random source is not ready yet; "
-                               "retry smb2_init_context() later");
+                int err = errno;
                 smb2_destroy_context(smb2);
+                errno = err;
                 return NULL;
         }
 

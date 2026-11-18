@@ -71,6 +71,59 @@ int gethostname(char *name, size_t len)
 
 #endif
 
+#ifdef __amigaos4__
+#include <devices/timer.h>
+#include <proto/exec.h>
+#include <errno.h>
+
+int smb2_amiga_random_bytes(void *buf, size_t len)
+{
+        unsigned char *p = buf;
+        struct MsgPort *port;
+        struct IOStdReq *req;
+        int err = ENOMEM;
+
+        port = IExec->AllocSysObjectTags(ASOT_PORT, TAG_END);
+        if (!port) {
+                errno = ENOMEM;
+                return -1;
+        }
+        req = IExec->AllocSysObjectTags(ASOT_IOREQUEST, ASOIOR_Size, sizeof(*req),
+                                        ASOIOR_ReplyPort, port, TAG_END);
+        if (!req) {
+                goto free_port;
+        }
+        err = EIO;
+        if (IExec->OpenDevice(TIMERNAME, UNIT_ENTROPY, (struct IORequest *)req, 0)) {
+                goto free_request;
+        }
+        req->io_Command = TR_READENTROPY;
+        while (len) {
+                req->io_Data = p;
+                req->io_Length = len;
+                if (IExec->DoIO((struct IORequest *)req) ||
+                    !req->io_Actual || req->io_Actual > len) {
+                        break;
+                }
+                p += req->io_Actual;
+                len -= req->io_Actual;
+        }
+        if (!len) {
+                err = 0;
+        }
+        IExec->CloseDevice((struct IORequest *)req);
+free_request:
+        IExec->FreeSysObject(ASOT_IOREQUEST, req);
+free_port:
+        IExec->FreeSysObject(ASOT_PORT, port);
+        if (err) {
+                errno = err;
+                return -1;
+        }
+        return 0;
+}
+#endif
+
 #if defined(__amigaos4__) || defined(__AMIGA__) || defined(__AROS__)
 #ifndef __amigaos4__
 #define NEED_READV

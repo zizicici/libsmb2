@@ -324,7 +324,7 @@ dnl  Check for a cryptographically strong source of random bytes.
 dnl  The NTLMv2 client challenge, the SMB 3.1.1 preauth salt and the
 dnl  AES-CCM nonce all need to be unpredictable. Not every platform we
 dnl  build for has such a source, so all of these are optional and
-dnl  smb2_random_bytes() falls back to random() when none is present.
+dnl  applications on other ports can register a cryptographic random provider.
 AC_CHECK_HEADERS([sys/random.h])
 AC_CHECK_FUNCS([arc4random_buf getrandom])
 

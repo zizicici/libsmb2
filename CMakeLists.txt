@@ -304,9 +304,7 @@ endif()
     endif()
 
     # Look for a cryptographically strong source of random bytes for
-    # smb2_random_bytes(). Only probed on the host-like systems: anything we
-    # do not positively identify here simply falls back to the random()
-    # based path, so the console and embedded toolchains are left alone.
+    # smb2_random_bytes() on hosted targets. Other ports can register a provider.
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin|.*BSD|Solaris|Android|Haiku")
       include(CheckSymbolExists)
       check_symbol_exists(arc4random_buf "stdlib.h" HAVE_ARC4RANDOM_BUF)

@@ -327,6 +327,11 @@ int getlogin_r(char *buf, size_t size);
 
 #endif /* __DREAMCAST__ */
 
+#ifdef __amigaos4__
+#include <stddef.h>
+int smb2_amiga_random_bytes(void *buf, size_t len);
+#endif
+
 #if defined(__amigaos4__) || defined(__AMIGA__) || defined(__AROS__)
 
 #include <errno.h>
