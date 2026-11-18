@@ -2251,6 +2251,23 @@ positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
         }
 }
 
+static uint32_t
+file_io_length(struct smb2_context *smb2, uint32_t count, uint32_t negotiated_max)
+{
+        uint32_t credits = 1;
+
+        if (negotiated_max) {
+                count = MIN(count, negotiated_max);
+        }
+        /* A single-credit request can proceed as soon as the server grants
+         * a credit, even when the current balance is zero or negative. */
+        if (smb2->dialect > SMB2_VERSION_0202 && smb2->supports_multi_credit &&
+            smb2->credits > 0) {
+                credits = MIN(smb2->credits, MAX_CREDITS - 16);
+        }
+        return MIN(count, credits * 65536U);
+}
+
 struct read_data {
         smb2_command_cb cb;
         void *cb_data;
@@ -2296,7 +2313,6 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
         struct smb2_read_request req;
         struct read_data *rd;
         struct smb2_pdu *pdu;
-        int needed_credits;
 
         if (smb2 == NULL) {
                 return -EINVAL;
@@ -2324,37 +2340,7 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
         rd->read_cb_data.count = count;
         rd->read_cb_data.offset = offset;
 
-        if (count > 0) {
-                /* A zero limit means "not negotiated": clamping to it
-                 * would wrap the (count - 1) credit computation. */
-                if (smb2->max_read_size > 0 && count > smb2->max_read_size) {
-                        count = smb2->max_read_size;
-                }
-                needed_credits = (count - 1) / 65536 + 1;
-
-                if (smb2->dialect > SMB2_VERSION_0202) {
-                        if (needed_credits > MAX_CREDITS - 16) {
-                                count =  (MAX_CREDITS - 16) * 65536;
-                        }
-                        needed_credits = (count - 1) / 65536 + 1;
-                        /* Never multiply a non-positive balance:
-                         * ask for one credit's worth so any grant
-                         * unblocks the request. */
-                        if (smb2->credits <= 0) {
-                                if (count > 65536) {
-                                        count = 65536;
-                                }
-                        } else if (needed_credits > smb2->credits) {
-                                count = smb2->credits * 65536;
-                        }
-                } else {
-                        if (count > 65536) {
-                                count = 65536;
-                        }
-                }
-                needed_credits = (count - 1) / 65536 + 1;
-        }
-
+        count = file_io_length(smb2, count, smb2->max_read_size);
         memset(&req, 0, sizeof(struct smb2_read_request));
         req.flags = 0;
         req.length = count;
@@ -2438,7 +2424,6 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         struct smb2_write_request req;
         struct write_data *wr;
         struct smb2_pdu *pdu;
-        int needed_credits;
 
         if (smb2 == NULL) {
                 return -EINVAL;
@@ -2466,42 +2451,7 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         wr->write_cb_data.count = count;
         wr->write_cb_data.offset = offset;
 
-        if (count > 0) {
-                /* Same guard as the read path. */
-                if (smb2->max_write_size > 0 && count > smb2->max_write_size) {
-                        count = smb2->max_write_size;
-                }
-                needed_credits = (count - 1) / 65536 + 1;
-
-                if (smb2->dialect > SMB2_VERSION_0202) {
-                        if (needed_credits > MAX_CREDITS - 16) {
-                                count =  (MAX_CREDITS - 16) * 65536;
-                        }
-                        needed_credits = (count - 1) / 65536 + 1;
-                        /* Same guard as the read path. */
-                        if (smb2->credits <= 0) {
-                                if (count > 65536) {
-                                        count = 65536;
-                                }
-                        } else if (needed_credits > smb2->credits) {
-                                count = smb2->credits * 65536;
-                        }
-                } else {
-                        if (count > 65536) {
-                                count = 65536;
-                        }
-                }
-                /*
-                 * smb2_encode_write_request() clamps !multi_credit
-                 * requests to 64 KiB; match it here so the reply
-                 * ceiling equals the on-wire amount.
-                 */
-                if (!smb2->supports_multi_credit && count > 65536) {
-                        count = 65536;
-                }
-                needed_credits = (count - 1) / 65536 + 1;
-        }
-
+        count = file_io_length(smb2, count, smb2->max_write_size);
         wr->sent = count;
 
         memset(&req, 0, sizeof(struct smb2_write_request));
