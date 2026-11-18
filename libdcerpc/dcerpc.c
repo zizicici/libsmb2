@@ -3418,11 +3418,17 @@ dcerpc_call_async(struct dcerpc_context *dce,
         }
         dcerpc_free_iovec(&iov);
 
+        /* Track before sending: queueing can fail the fragment
+         * synchronously (e.g. sealing with no keys), and that path runs
+         * the callback, which untracks and frees the pdu before
+         * dcerpc_send_request_frag() returns. Tracking afterwards would
+         * write the freed pdu back onto dce->pending. */
+        dcerpc_track(dce, &pdu->pending, cb, cb_data);
         if (dcerpc_send_request_frag(dce, pdu)) {
+                dcerpc_untrack(dce, &pdu->pending);
                 dcerpc_free_pdu(dce, pdu);
                 return -ENOMEM;
         }
-        dcerpc_track(dce, &pdu->pending, cb, cb_data);
         return 0;
 }
 
