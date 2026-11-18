@@ -10,6 +10,7 @@ noinst_PROGRAMS = prog_ls prog_mkdir prog_rmdir prog_cat \
 noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit entropy-unit
 noinst_PROGRAMS += prog_sequential_io
 noinst_PROGRAMS += open-cancel-unit
+noinst_PROGRAMS += link-handle-unit
 
 EXTRA_PROGRAMS = ld_sockerr
 CLEANFILES = ld_sockerr.o ld_sockerr.so
