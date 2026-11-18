@@ -33,6 +33,13 @@
 #include <stdlib.h>
 #endif
 
+#ifdef _WIN32
+/* WIN32_LEAN_AND_MEAN (always set by the build) keeps windows.h from
+ * pulling in winsock.h ahead of compat.h's winsock2.h. */
+#include <windows.h>
+#include <bcrypt.h>
+#endif
+
 #ifdef HAVE_STRING_H
 #include <string.h>
 #endif
@@ -349,6 +356,20 @@ smb2_random_bytes(void *buf, size_t len)
 {
         uint8_t *p = buf;
 
+#ifdef _WIN32
+        /*
+         * The system-preferred CSPRNG needs no algorithm handle on Vista
+         * and later. Without this branch Windows has no strong source at
+         * all and would fall through to the seeded random() sequence —
+         * and return -1, which since the nonce check fails every sealed
+         * send outright.
+         */
+        if (BCRYPT_SUCCESS(BCryptGenRandom(
+                    NULL, p, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+                return 0;
+        }
+#endif
+
 #if defined(HAVE_ARC4RANDOM_BUF) && \
         !(defined(__linux__) && (defined(HAVE_GETRANDOM) || \
                                  defined(HAVE_DEV_URANDOM)))
@@ -459,10 +480,18 @@ struct smb2_context *smb2_init_context(void)
         smb2->version = SMB2_VERSION_ANY;
         smb2->ndr = 1;
 
-        smb2_random_bytes(smb2->client_challenge,
-                          sizeof(smb2->client_challenge));
-        smb2_random_bytes(smb2->salt, sizeof(smb2->salt));
-        smb2_random_bytes(smb2->client_guid, sizeof(smb2->client_guid));
+        if (smb2_random_bytes(smb2->client_challenge,
+                              sizeof(smb2->client_challenge)) ||
+            smb2_random_bytes(smb2->salt, sizeof(smb2->salt)) ||
+            smb2_random_bytes(smb2->client_guid, sizeof(smb2->client_guid))) {
+                /* E.g. getrandom() reporting the CRNG is not seeded yet:
+                 * the buffers stayed zeroed and would never be redrawn.
+                 * Fail the whole context so the caller retries later. */
+                smb2_set_error(smb2, "Random source is not ready yet; "
+                               "retry smb2_init_context() later");
+                smb2_destroy_context(smb2);
+                return NULL;
+        }
 
         smb2->session_key = NULL;
 
