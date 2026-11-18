@@ -35,6 +35,7 @@
 #include "portable-endian.h"
 #include "aes.h"
 #include "aes128ccm.h"
+#include "aes-armv8.h"
 
 #ifndef HAVE_OPENSSL
 
@@ -162,6 +163,12 @@ int aes128ccm_encrypt(unsigned char *key,
 {
         unsigned char s[16] _U_;
 
+#if SMB2_ARMV8_AES
+        if (smb2_armv8_available()) {
+                return aes128ccm_armv8_encrypt(key, nonce, nlen, aad, alen,
+                                               p, plen, m, mlen);
+        }
+#endif
         ccm_generate_T(key, nonce, nlen, aad, alen, p, plen, m, mlen);
         ccm_generate_s(key, nonce, nlen, plen, 0, &s[0]);
         bxory(m, &s[0], mlen);
@@ -180,6 +187,12 @@ int aes128ccm_decrypt(unsigned char *key,
         unsigned char s[16] _U_;
         unsigned char tmp[16];
 
+#if SMB2_ARMV8_AES
+        if (smb2_armv8_available()) {
+                return aes128ccm_armv8_decrypt(key, nonce, nlen, aad, alen,
+                                               p, plen, m, mlen);
+        }
+#endif
         aes_ccm_crypt(key, nonce, nlen, p, plen);
 
         ccm_generate_T(key, nonce, nlen, aad, alen, p, plen, tmp, mlen);
