@@ -4793,14 +4793,15 @@ notify_change_cb(struct smb2_context *smb2, int status,
                 free(fnc);
                 if (notify_change_data->owns_fh) {
                         /* The connection is still up for e.g.
-                         * STATUS_NOTIFY_ENUM_DIR: send a real SMB CLOSE
-                         * (the caller resubscribes after an overflow, and
-                         * freeing locally would leak the server-side
-                         * handle each time). smb2_close_async() frees the
-                         * handle when the close completes; only free it
-                         * here when no close can be sent. */
+                         * STATUS_NOTIFY_ENUM_DIR and for a CANCELLED watch
+                         * (the server answers SMB CANCEL while the session
+                         * lives): send a real SMB CLOSE, or the server-side
+                         * directory handle leaks until the session ends
+                         * whenever the caller cancels or resubscribes.
+                         * smb2_close_async() frees the handle when the
+                         * close completes; only free it here when no close
+                         * can be sent (teardown). */
                         if ((uint32_t)status != SMB2_STATUS_SHUTDOWN &&
-                            (uint32_t)status != SMB2_STATUS_CANCELLED &&
                             smb2_close_async(smb2, notify_change_data->fh,
                                              notify_close_cb, NULL) == 0) {
                                 /* handled by the close */
