@@ -5190,9 +5190,13 @@ notify_change_cb(struct smb2_context *smb2, int status,
 
         struct smb2_change_notify_reply *rep = command_data;
         struct smb2_iovec vec;
-        struct smb2_file_notify_change_information *fnc = calloc(1, sizeof(struct smb2_file_notify_change_information));
+        struct smb2_file_notify_change_information *fnc;
         int decode_status = 0;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        fnc = calloc(1, sizeof(*fnc));
         if (status && (uint32_t)status != SMB2_STATUS_NOTIFY_ENUM_DIR &&
             (uint32_t)status != SMB2_STATUS_NOTIFY_CLEANUP) {
                 smb2_set_error(smb2, "notify_change_cb failed (%s) %s\n",
