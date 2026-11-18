@@ -69,8 +69,20 @@ static int check_io(struct smb2_context *smb2, const char *path)
             smb2_close(smb2, fh)) {
                 return -1;
         }
-        return completed(&r[0], 6, 0) && completed(&r[1], 2, 6) &&
-               completed(&r[2], 0, 8) && !memcmp(buf, "AACCBBBB", 8) ? 0 : -1;
+        if (!completed(&r[0], 6, 0) || !completed(&r[1], 2, 6) ||
+            !completed(&r[2], 0, 8) || memcmp(buf, "AACCBBBB", 8)) {
+                return -1;
+        }
+        fh = smb2_open(smb2, path, O_RDWR);
+        if (!fh || smb2_write_async(smb2, fh, first, 4, write_done, &w[0]) ||
+            smb2_write_async(smb2, fh, second, 4, write_done, &w[1]) ||
+            smb2_ftruncate(smb2, fh, 2) || smb2_close(smb2, fh)) {
+                return -1;
+        }
+        {
+                struct smb2_stat_64 st;
+                return !smb2_stat(smb2, path, &st) && st.smb2_size == 2 ? 0 : -1;
+        }
 }
 
 int main(int argc, char **argv)

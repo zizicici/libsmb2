@@ -2155,6 +2155,7 @@ struct file_io {
         union {
                 struct smb2_read_cb_data read;
                 struct smb2_write_cb_data write;
+                uint64_t truncate_length;
         } args;
 };
 
@@ -2602,6 +2603,8 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
         return 0;
 }
 
+static int submit_ftruncate(struct smb2_context *, struct file_io *);
+
 static int
 submit_file_io(struct smb2_context *smb2, struct file_io *io)
 {
@@ -2618,6 +2621,8 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
                 return smb2_pwrite_async(smb2, fh, io->args.write.buf,
                                          io->args.write.count, io->offset,
                                          file_io_done, io);
+        case SMB2_SET_INFO:
+                return submit_ftruncate(smb2, io);
         case SMB2_FLUSH:
                 return submit_fsync(smb2, fh, file_io_done, io);
         case SMB2_CLOSE:
@@ -2716,6 +2721,8 @@ queue_file_io(struct smb2_context *smb2, struct smb2fh *fh,
                 io->args.read.fh = fh;
                 io->args.read.buf = buf;
                 io->args.read.count = count;
+        } else if (command == SMB2_SET_INFO) {
+                io->args.truncate_length = *(const uint64_t *)buf;
         } else if (command == SMB2_CLOSE) {
                 fh->closing = 1;
         }
@@ -3859,68 +3866,49 @@ smb2_link_async(struct smb2_context *smb2, const char *oldpath,
 }
 
 static void
-ftrunc_cb_1(struct smb2_context *smb2, int status,
-            void *command_data _U_, void *private_data)
+ftruncate_cb(struct smb2_context *smb2, int status,
+             void *command_data _U_, void *private_data)
 {
-        struct create_cb_data *cb_data = private_data;
-
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Truncate failed with "
                                  "(0x%08x) %s", status, nterror_to_str(status));
         }
-        cb_data->cb(smb2, -nterror_to_errno(status),
-                    NULL, cb_data->cb_data);
-        free(cb_data);
+        file_io_done(smb2, -nterror_to_errno(status), NULL, private_data);
+}
+
+static int
+submit_ftruncate(struct smb2_context *smb2, struct file_io *io)
+{
+        struct smb2_set_info_request req = {0};
+        struct smb2_file_end_of_file_info eofi;
+        struct smb2_pdu *pdu;
+
+        eofi.end_of_file = io->args.truncate_length;
+        if (smb2->passthrough) {
+                eofi.end_of_file = htole64(eofi.end_of_file);
+        }
+        req.info_type = SMB2_0_INFO_FILE;
+        req.file_info_class = SMB2_FILE_END_OF_FILE_INFORMATION;
+        memcpy(req.file_id, io->fh->file_id, SMB2_FD_SIZE);
+        req.buffer_length = 8;
+        req.input_data = &eofi;
+
+        pdu = smb2_cmd_set_info_async(smb2, &req, ftruncate_cb, io);
+        if (pdu == NULL) {
+                smb2_set_error(smb2, "Failed to create set info command");
+                return -ENOMEM;
+        }
+        return queue_io_pdu(smb2, pdu, file_io_done, io);
 }
 
 int
 smb2_ftruncate_async(struct smb2_context *smb2, struct smb2fh *fh,
                      uint64_t length, smb2_command_cb cb, void *cb_data)
 {
-        struct create_cb_data *create_data;
-        struct smb2_set_info_request req;
-        struct smb2_file_end_of_file_info eofi _U_;
-        struct smb2_pdu *pdu;
-
-        if (smb2 == NULL) {
-                return -EINVAL;
-        }
-        if (fh == NULL) {
-                smb2_set_error(smb2, "File handle was NULL");
-                return -EINVAL;
-        }
-
-        create_data = calloc(1, sizeof(struct create_cb_data));
-        if (create_data == NULL) {
-                smb2_set_error(smb2, "Failed to allocate create_data");
-                return -ENOMEM;
-        }
-
-        create_data->cb = cb;
-        create_data->cb_data = cb_data;
-
-        eofi.end_of_file = length;
-
-        memset(&req, 0, sizeof(struct smb2_set_info_request));
-        req.info_type = SMB2_0_INFO_FILE;
-        req.file_info_class = SMB2_FILE_END_OF_FILE_INFORMATION;
-        req.additional_information = 0;
-        memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
-        req.input_data = &eofi;
-
-        pdu = smb2_cmd_set_info_async(smb2, &req, ftrunc_cb_1, create_data);
-        if (pdu == NULL) {
-                smb2_set_error(smb2, "Failed to create set info command");
-                free(create_data);
-                return -ENOMEM;
-        }
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                free(create_data);
-                return -EIO;
-        }
-
-        return 0;
+        return queue_file_io(smb2, fh, SMB2_SET_INFO, &length, 0, cb, cb_data);
 }
 
 struct symlink_cb_data {
