@@ -170,6 +170,28 @@ static void timeout_batch(struct smb2_context *smb2)
         smb2->credits = 32;
 }
 
+static void copy_across_tree_switch(struct smb2_context *smb2)
+{
+        struct smb2_srv_copychunk chunk = {0};
+        struct smb2_ioctl_reply rep = {0};
+        struct callbacks calls = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+
+        assert(smb2_select_tree_id(smb2, 1) == 0);
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        chunk.length = 1;
+        assert(smb2_server_side_copy_async(smb2, SMB2_FSCTL_SRV_COPYCHUNK,
+                                           fh, fh, &chunk, 1, completed, &calls) == 0);
+        rep.output = smb2_alloc_init(smb2, sizeof(struct smb2_srv_copychunk_resume_key));
+        assert(rep.output);
+        /* reply() selects tree 2 before it dispatches each completion. */
+        reply(smb2, SMB2_IOCTL, SMB2_STATUS_SUCCESS, &rep);
+        reply(smb2, SMB2_IOCTL, SMB2_STATUS_ACCESS_DENIED, NULL);
+        assert(calls.completed == 1);
+}
+
 static void disconnect_during_copy(struct smb2_context *smb2, int peer)
 {
         struct smb2_srv_copychunk_resume_key key = {0};
@@ -216,6 +238,7 @@ int main(void)
         reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND, NULL);
         assert(owner == NULL && smb2->fhs == NULL);
         timeout_batch(smb2);
+        copy_across_tree_switch(smb2);
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);

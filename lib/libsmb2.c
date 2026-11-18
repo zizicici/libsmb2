@@ -243,6 +243,13 @@ send_session_setup_request(struct smb2_context *smb2,
                            struct connect_data *c_data,
                            unsigned char *buf, int len);
 
+/* A raw FileId may have been wrapped before a tree was connected. */
+static uint32_t
+file_handle_tree_id(struct smb2_context *smb2, const struct smb2fh *fh)
+{
+        return fh->open_context ? fh->open_tree_id : smb2_tree_id(smb2);
+}
+
 /* Track an open handle on its context for the destroy sweep. */
 static void
 smb2_track_fh(struct smb2_context *smb2, struct smb2fh *fh)
@@ -2069,6 +2076,7 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
                 free_smb2fh(smb2, fh);
                 return NULL;
         }
+        fh->open_context = smb2;
         fh->open_tree_id = pdu->header.sync.tree_id;
         if (req.create_context && req.create_context_length) {
                 free(req.create_context);
@@ -2076,7 +2084,6 @@ _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *pat
 
         if (caller_frees_pdu) {
                 fh->cancel_pdu = pdu;
-                fh->open_context = smb2;
                 fh->cancel_free_cb = free_cb;
                 pdu->free_cb = open_cancelled;
                 pdu->cancel_in_flight = abandon_open;
@@ -4623,7 +4630,7 @@ static int
 smb2_copychunk_submit_async(struct smb2_context *smb2,
                             uint32_t ctl_code,
                             const struct smb2_srv_copychunk_resume_key *resume_key,
-                            const uint8_t *dst_file_id,
+                            const uint8_t *dst_file_id, uint32_t dst_tree_id,
                             const struct smb2_srv_copychunk *chunks,
                             uint32_t chunk_count,
                             smb2_command_cb cb, void *cb_data)
@@ -4679,6 +4686,7 @@ smb2_copychunk_submit_async(struct smb2_context *smb2,
                 free(ioctl_data);
                 return -EINVAL;
         }
+        smb2_set_tree_id_for_pdu(smb2, pdu, dst_tree_id);
         ioctl_data->pdu = pdu;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
@@ -4725,6 +4733,7 @@ smb2_request_resume_key_async(struct smb2_context *smb2, struct smb2fh *fh,
                 free(ioctl_data);
                 return -EINVAL;
         }
+        smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
         ioctl_data->pdu = pdu;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
@@ -4744,8 +4753,11 @@ smb2_copychunk_async(struct smb2_context *smb2,
                      uint32_t chunk_count,
                      smb2_command_cb cb, void *cb_data)
 {
+        if (!smb2 || !dstfh) {
+                return -EINVAL;
+        }
         return smb2_copychunk_submit_async(smb2, ctl_code, resume_key,
-                                           dstfh ? dstfh->file_id : NULL,
+                                           dstfh->file_id, file_handle_tree_id(smb2, dstfh),
                                            chunks, chunk_count, cb, cb_data);
 }
 
@@ -4753,6 +4765,7 @@ struct smb2_server_side_copy_data {
         smb2_command_cb cb;
         void *cb_data;
         smb2_file_id dst_file_id;
+        uint32_t dst_tree_id;
         uint32_t ctl_code;
         uint32_t chunk_count;
         struct smb2_srv_copychunk *chunks;
@@ -4775,6 +4788,7 @@ smb2_server_side_copy_resume_key_cb(struct smb2_context *smb2, int status,
 
         ret = smb2_copychunk_submit_async(smb2, copy_data->ctl_code,
                                           command_data, copy_data->dst_file_id,
+                                          copy_data->dst_tree_id,
                                           copy_data->chunks,
                                           copy_data->chunk_count,
                                           copy_data->cb,
@@ -4839,6 +4853,7 @@ smb2_server_side_copy_async(struct smb2_context *smb2,
         copy_data->cb = cb;
         copy_data->cb_data = cb_data;
         memcpy(copy_data->dst_file_id, dstfh->file_id, SMB2_FD_SIZE);
+        copy_data->dst_tree_id = file_handle_tree_id(smb2, dstfh);
         copy_data->ctl_code = ctl_code;
         copy_data->chunk_count = chunk_count;
 
@@ -5027,6 +5042,10 @@ smb2_fh_from_file_id(struct smb2_context *smb2, smb2_file_id *fileid)
                 return NULL;
         }
         memcpy(fh->file_id, fileid, SMB2_FD_SIZE);
+        if (smb2 && smb2->tree_id_top > 0) {
+                fh->open_context = smb2;
+                fh->open_tree_id = smb2_tree_id(smb2);
+        }
         if (smb2) {
                 smb2_track_fh(smb2, fh);
         }
