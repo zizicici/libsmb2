@@ -351,6 +351,9 @@ int smb2_fsync(struct smb2_context *smb2, struct smb2fh *fh)
 
 /* A failed wait can leave the PDU in flight. Its buffer is reusable only
  * after the asynchronous operation finishes, including during shutdown. */
+/* Cap idle storage per connection after an unusually large transfer. */
+#define SYNC_IO_CACHE_LIMIT (1024U * 1024U)
+
 struct sync_io_buffer {
         size_t capacity;
         struct sync_cb_data *waiter;
@@ -370,7 +373,7 @@ static void sync_io_done(struct smb2_context *smb2, int status, void *reply _U_,
                 waiter->is_finished = 1;
                 buffer->waiter = NULL;
         }
-        if (smb2->sync_io_buffer) {
+        if (smb2->sync_io_buffer || buffer->capacity > SYNC_IO_CACHE_LIMIT) {
                 free(buffer);
         } else {
                 smb2->sync_io_buffer = buffer;
