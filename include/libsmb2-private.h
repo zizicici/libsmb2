@@ -856,6 +856,7 @@ uint32_t smb2_file_io_length(struct smb2_context *smb2, enum smb2_command comman
 int smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh,
                        enum smb2_command command, void *buf, uint32_t count,
                        const uint64_t *position, smb2_command_cb cb, void *cb_data);
+int smb2_expire_link_create(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu);
 void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);

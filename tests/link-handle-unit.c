@@ -65,7 +65,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
         }
         if (smb2->passthrough) {
                 assert(!pdu->report_pending);
-                assert(!result->completed || (command == SMB2_CLOSE && result->status == -ETIMEDOUT));
+                assert(!result->completed || result->status == -ETIMEDOUT);
         }
         smb2->waitqueue = pdu->next;
         pdu->next = NULL;
@@ -147,6 +147,36 @@ static void run(struct smb2_context *smb2, enum operation op)
         }
 }
 
+static void late_create(struct smb2_context *smb2, int unlink_op)
+{
+        struct result result = {0};
+        struct smb2_create_reply created = {0};
+        struct smb2_pdu *create;
+
+        smb2->credits = 32;
+        assert(!smb2_select_tree_id(smb2, original_tree));
+        if (unlink_op) {
+                assert(!smb2_unlink_async(smb2, "link", completed, &result));
+                reply(smb2, SMB2_CREATE, SMB2_STATUS_FILE_IS_A_DIRECTORY, NULL, &result, -1);
+                reply(smb2, SMB2_CLOSE, SMB2_STATUS_FILE_IS_A_DIRECTORY, NULL, &result, -1);
+        } else {
+                assert(!smb2_symlink_async(smb2, "target", "link", 0, completed, &result));
+        }
+        create = smb2->waitqueue;
+        assert(create && create->next);
+        create->timeout = create->next->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && result.completed == 1 && result.status == -ETIMEDOUT);
+        assert(smb2->waitqueue == create && !create->next);
+        assert(!smb2_select_tree_id(smb2, other_tree));
+        memcpy(created.file_id, opened_id, sizeof(opened_id));
+        reply(smb2, SMB2_CREATE, 0, &created, &result, -1);
+        if (!unlink_op) {
+                reply(smb2, SMB2_SET_INFO, 0, NULL, &result, 16);
+        }
+        reply(smb2, SMB2_CLOSE, 0, NULL, &result, 8);
+        assert(result.completed == 1 && !smb2->waitqueue);
+}
+
 static void received_set_info(struct smb2_context *smb2 _U_, int status, void *data, void *priv)
 {
         struct smb2_set_info_request *req = data;
@@ -216,8 +246,13 @@ int main(void)
         for (passthrough = 0; passthrough <= 1; passthrough++) {
                 smb2_set_passthrough(smb2, passthrough);
                 for (op = UNLINK_DIRECTORY; op <= DELAY_CLOSE; op++) {
+                        char sent[4096];
                         run(smb2, op);
+                        while (recv(sockets[1], sent, sizeof(sent), MSG_DONTWAIT) > 0) {
+                        }
                 }
+                late_create(smb2, 0);
+                late_create(smb2, 1);
         }
         smb2_destroy_context(smb2);
         close(sockets[1]);

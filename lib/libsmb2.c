@@ -1997,20 +1997,6 @@ open_cb(struct smb2_context *smb2, int status, void *reply, void *data)
         dispatch_create(fh->cancel_pdu, open_created, smb2, status, reply, fh);
 }
 
-/* After cancellation a successful CREATE still needs a CLOSE, even if its
- * original caller's deadline has elapsed. This includes symlink retries. */
-int
-smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu)
-{
-        if (pdu->cb == open_cb) {
-                return ((const struct smb2fh *)pdu->cb_data)->cb == NULL;
-        }
-        if (pdu->cb == opendir_cb) {
-                return ((const struct smb2dir *)pdu->cb_data)->cb == NULL;
-        }
-        return 0;
-}
-
 static struct smb2_pdu *
 _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *path, int flags,
                 uint8_t oplock_level, uint32_t lease_state, smb2_lease_key lease_key,
@@ -3817,14 +3803,16 @@ link_finish(struct smb2_context *smb2, struct symlink_cb_data *data,
         if (data->status != SMB2_STATUS_SUCCESS) {
                 status = data->status;
         }
-        if (status != SMB2_STATUS_SUCCESS) {
+        if (data->cb && status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Link operation failed: %s",
                                  nterror_to_str(status));
         }
         if (data->close_pdu) {
                 smb2_free_pdu(smb2, data->close_pdu);
         }
-        data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
+        if (data->cb) {
+                data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
+        }
         free_symlink_data(data);
 }
 
@@ -3946,6 +3934,44 @@ link_open_cb(struct smb2_context *smb2, int status,
         link_request_done(smb2, data, status);
 }
 
+/* After cancellation a successful CREATE still needs a CLOSE, even if its
+ * original caller's deadline has elapsed. This includes symlink retries. */
+int
+smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu)
+{
+        if (pdu->cb == open_cb) {
+                return ((const struct smb2fh *)pdu->cb_data)->cb == NULL;
+        }
+        if (pdu->cb == opendir_cb) {
+                return ((const struct smb2dir *)pdu->cb_data)->cb == NULL;
+        }
+        if (pdu->cb == link_open_cb) {
+                return ((const struct symlink_cb_data *)pdu->cb_data)->cb == NULL;
+        }
+        return 0;
+}
+
+/* A sent link CREATE may already own the server handle. Keep its reference
+ * until the FileId arrives, and complete the application independently. */
+int
+smb2_expire_link_create(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        struct symlink_cb_data *data;
+        smb2_command_cb cb;
+        void *cb_data;
+
+        if (pdu->cb != link_open_cb) {
+                return 0;
+        }
+        data = pdu->cb_data;
+        cb = data->cb;
+        cb_data = data->cb_data;
+        data->cb = NULL;
+        data->cb_data = NULL;
+        cb(smb2, -ETIMEDOUT, NULL, cb_data);
+        return 1;
+}
+
 static void
 symlink_ioctl_cb(struct smb2_context *smb2, int status,
                  void *command_data _U_, void *private_data)
@@ -3973,7 +3999,7 @@ unlink_dir_tag_cb(struct smb2_context *smb2, int status,
                 } else {
                         smb2_set_stat_type(&st, tag->file_attributes, tag->reparse_tag);
                         if (st.smb2_type == SMB2_TYPE_LINK && tag->reparse_tag != 0) {
-                                data->delete_on_close = 1;
+                                data->delete_on_close = data->cb != NULL;
                         } else {
                                 status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
                         }
