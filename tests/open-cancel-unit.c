@@ -369,6 +369,27 @@ static void close_waiting_for_credit(struct smb2_context *smb2)
         assert(expired == 1);
 }
 
+static void directory_close_waiting_for_credit(struct smb2_context *smb2)
+{
+        struct smb2_create_reply created = {0};
+        int expired = 0;
+        assert(!smb2_select_tree_id(smb2, 1));
+        smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
+        assert(!smb2_opendir_async(smb2, "", expect_timeout, &expired));
+        reply(smb2, SMB2_CREATE, 0, &created);
+        smb2->credits = -1; /* reply() grants one credit */
+        reply(smb2, SMB2_QUERY_DIRECTORY, SMB2_STATUS_NO_MORE_FILES, NULL);
+        assert(smb2->outqueue && !smb2->waitqueue);
+        smb2->outqueue->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && expired == 1 && !smb2->dirs);
+        assert(smb2->outqueue && !smb2->outqueue->timeout);
+        smb2->credits = 32;
+        assert(!smb2_service(smb2, POLLOUT));
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        smb2_set_timeout(smb2, 0);
+}
+
 static void deferred_io_timeout(struct smb2_context *smb2, int positioned)
 {
         struct callbacks calls = {0};
@@ -857,6 +878,7 @@ int main(void)
         mixed_io_timeouts();
         promoted_io_timeout(smb2);
         close_waiting_for_credit(smb2);
+        directory_close_waiting_for_credit(smb2);
         deferred_io_timeout(smb2, 0);
         deferred_io_timeout(smb2, 1);
         flush_after_tree_switch(smb2);

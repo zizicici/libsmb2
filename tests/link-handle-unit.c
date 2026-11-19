@@ -23,7 +23,7 @@
 static const uint32_t original_tree = 11, other_tree = 22;
 static const smb2_file_id opened_id = {1, 2, 3, 4, 5, 6, 7, 8};
 
-enum operation { UNLINK_DIRECTORY, UNLINK_NO_TAG, UNLINK_TAG_EOF, UNLINK_LINK, CREATE_LINK, FAIL_CREATE_LINK };
+enum operation { UNLINK_DIRECTORY, UNLINK_NO_TAG, UNLINK_TAG_EOF, UNLINK_LINK, CREATE_LINK, FAIL_CREATE_LINK, DELAY_CLOSE };
 
 struct result {
         int completed;
@@ -65,7 +65,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
         }
         if (smb2->passthrough) {
                 assert(!pdu->report_pending);
-                assert(result->completed == 0 && smb2->waitqueue == pdu);
+                assert(!result->completed || (command == SMB2_CLOSE && result->status == -ETIMEDOUT));
         }
         smb2->waitqueue = pdu->next;
         pdu->next = NULL;
@@ -82,11 +82,12 @@ static void run(struct smb2_context *smb2, enum operation op)
         int unlink_op = op <= UNLINK_LINK;
 
         smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
         assert(!smb2_select_tree_id(smb2, original_tree));
         if (unlink_op) {
                 assert(!smb2_unlink_async(smb2, "link", completed, &result));
         } else {
-                assert(!smb2_symlink_async(smb2, op == CREATE_LINK ? "//server/share/target" : "target",
+                assert(!smb2_symlink_async(smb2, op == FAIL_CREATE_LINK ? "target" : "//server/share/target",
                                            "link", SMB2_SYMLINK_DIRECTORY,
                                            completed, &result));
         }
@@ -113,11 +114,24 @@ static void run(struct smb2_context *smb2, enum operation op)
                 query.output_buffer = tag;
                 reply(smb2, SMB2_QUERY_INFO, 0, &query, &result, -1);
         } else {
+                if (op == DELAY_CLOSE) {
+                        smb2->credits = 0;
+                }
                 reply(smb2, SMB2_IOCTL, op == FAIL_CREATE_LINK ? SMB2_STATUS_ACCESS_DENIED : 0,
                       NULL, &result, -1);
         }
         if (op == UNLINK_LINK || op == FAIL_CREATE_LINK) {
                 reply(smb2, SMB2_SET_INFO, 0, NULL, &result, 16);
+        }
+        if (op == DELAY_CLOSE) {
+                assert(smb2->outqueue && !smb2->waitqueue);
+                smb2->outqueue->timeout = time(NULL) - 1;
+                assert(!smb2_service(smb2, 0));
+                assert(result.completed == 1 && result.status == -ETIMEDOUT);
+                assert(smb2->outqueue && !smb2->outqueue->timeout);
+                smb2->credits = 1;
+                assert(!smb2_service(smb2, POLLOUT));
+                assert(smb2->waitqueue && smb2->waitqueue->timeout > time(NULL));
         }
         reply(smb2, SMB2_CLOSE, 0, NULL, &result, 8);
         assert(result.completed == 1 && smb2->waitqueue == NULL);
@@ -195,12 +209,13 @@ int main(void)
 
         assert(smb2 && socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
         smb2->fd = sockets[0];
+        smb2->dialect = SMB2_VERSION_0210;
         assert(!smb2_connect_tree_id(smb2, original_tree));
         assert(!smb2_connect_tree_id(smb2, other_tree));
         padded_set_info(smb2);
         for (passthrough = 0; passthrough <= 1; passthrough++) {
                 smb2_set_passthrough(smb2, passthrough);
-                for (op = UNLINK_DIRECTORY; op <= FAIL_CREATE_LINK; op++) {
+                for (op = UNLINK_DIRECTORY; op <= DELAY_CLOSE; op++) {
                         run(smb2, op);
                 }
         }

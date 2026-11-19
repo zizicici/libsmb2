@@ -519,6 +519,11 @@ close_abandoned_file(struct smb2_context *smb2, uint32_t tree_id, smb2_file_id f
         memcpy(req.file_id, file_id, SMB2_FD_SIZE);
         pdu = smb2_cmd_close_async(smb2, &req, abandoned_close_cb, NULL);
         if (pdu) {
+                pdu->cleanup_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
+                if (smb2->pdu && smb2->pdu->cleanup_timeout) {
+                        pdu->cleanup_timeout = smb2->pdu->cleanup_timeout;
+                }
+                pdu->timeout = 0;
                 smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
                 smb2_queue_pdu_final(smb2, pdu);
         }
@@ -671,6 +676,7 @@ query_cb(struct smb2_context *smb2, int status,
                         opendir_complete(smb2, dir, -ENOMEM);
                         return;
                 }
+                pdu->cleanup_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
                 smb2_set_tree_id_for_pdu(smb2, pdu, dir->tree_id);
                 if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                         opendir_complete(smb2, dir, -EIO);
@@ -2277,15 +2283,16 @@ close_cb(struct smb2_context *smb2, int status,
 int
 smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
-        struct file_io *io;
-        if (pdu->cb != close_cb) {
+        smb2_command_cb cb = pdu->cb;
+        void *cb_data = pdu->cb_data;
+
+        if (pdu->header.command != SMB2_CLOSE || !pdu->cleanup_timeout) {
                 return 0;
         }
-        io = pdu->cb_data;
         pdu->timeout = 0;
         pdu->cb = abandoned_close_cb;
         pdu->cb_data = NULL;
-        file_io_done(smb2, io, -ETIMEDOUT, NULL);
+        cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL, cb_data);
         return 1;
 }
 
@@ -3835,7 +3842,7 @@ link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
 
         data->close_pdu = NULL;
         smb2_set_close_file_id(pdu, data->file_id);
-        pdu->timeout = smb2->timeout ? time(NULL) + smb2->timeout : 0;
+        pdu->timeout = pdu->cleanup_timeout ? time(NULL) + pdu->cleanup_timeout : 0;
         if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
@@ -3854,6 +3861,7 @@ link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
                 free_symlink_data(data);
                 return -ENOMEM;
         }
+        data->close_pdu->cleanup_timeout = create->cleanup_timeout;
         smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
         if (smb2_queue_pdu_final(smb2, create) < 0) {
                 smb2_free_pdu(smb2, data->close_pdu);
