@@ -452,6 +452,7 @@ struct smb2_pdu {
         /* this error reply uses the IOCTL reply format */
         int ioctl_reply_format;
 
+        uint8_t timed_out:1; /* partial frame awaiting teardown */
         /* For encrypted PDUs */
         uint8_t seal:1;
         uint32_t crypt_len;

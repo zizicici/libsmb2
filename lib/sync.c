@@ -127,7 +127,8 @@ static int wait_for_reply(struct smb2_context *smb2,
                 if (pfd.revents == 0) {
                         continue;
                 }
-		if (smb2_service(smb2, pfd.revents) < 0) {
+		rc = smb2_service(smb2, pfd.revents);
+		if (rc < 0) {
                         /*
                          * Our reply was processed before the error: the
                          * call completed, so return its result. The
@@ -135,6 +136,9 @@ static int wait_for_reply(struct smb2_context *smb2,
                          */
                         if (cb_data->is_finished) {
                                 break;
+                        }
+                        if (rc == -ETIMEDOUT) {
+                                return rc;
                         }
 			smb2_set_error(smb2, "smb2_service failed with : "
                                         "%s\n", smb2_get_error(smb2));

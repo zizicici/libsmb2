@@ -1335,17 +1335,27 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
 int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
+        struct smb2_pdu *receiving = smb2_is_server(smb2) ? NULL : smb2->pdu;
         time_t t;
         int servicing = smb2->servicing;
 
         if (!smb2->outqueue && !smb2->waitqueue) {
                 smb2->may_have_timed_pdus = 0;
         }
-        if (!smb2->may_have_timed_pdus && !smb2->io_timers) {
+        if (!smb2->may_have_timed_pdus && !smb2->io_timers &&
+            !(receiving && receiving->timeout)) {
                 return 0;
         }
         t = time(NULL);
         smb2->servicing = 1;
+
+        /* Matching the reply header removes this request from the waitqueue.
+         * The receiver still owns it until the entire reply has arrived. */
+        if (receiving && receiving->timeout && receiving->timeout < t) {
+                receiving->timed_out = 1;
+                smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
+                goto partial_frame;
+        }
 
         pdu = smb2->outqueue;
         while (pdu) {
@@ -1353,13 +1363,9 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         struct smb2_pdu *p;
 
                         if (pdu->out.num_done) {
-                                /* A following frame would be read as the missing tail.
-                                 * The failed service call hands cleanup to the caller. */
+                                pdu->timed_out = 1;
                                 smb2_set_error(smb2, "Timed out sending a partial SMB frame");
-                                smb2_close_context(smb2);
-                                smb2->servicing = servicing;
-                                smb2_finish_dispatch(smb2);
-                                return -ETIMEDOUT;
+                                goto partial_frame;
                         }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         /*
@@ -1412,5 +1418,13 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         smb2->servicing = servicing;
         smb2_finish_dispatch(smb2);
         return 0;
+
+partial_frame:
+        /* The stream cannot skip the rest of a frame. Context destruction
+         * will complete outstanding requests once the dispatcher unwinds. */
+        smb2_close_context(smb2);
+        smb2->servicing = servicing;
+        smb2_finish_dispatch(smb2);
+        return -ETIMEDOUT;
 }
 

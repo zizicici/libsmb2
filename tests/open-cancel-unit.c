@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
@@ -601,24 +602,59 @@ static void sync_buffers_after_failed_wait(void)
         smb2_destroy_context(smb2);
 }
 
+static void partial_reply_timeout(int sync_wait)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        int expired = 0;
+        uint8_t prefix[SMB2_SPL_SIZE + SMB2_HEADER_SIZE];
+        int pair[2];
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        assert(!fcntl(pair[0], F_SETFL, O_NONBLOCK));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
+        assert(!smb2_echo_async(smb2, expect_timeout, &expired));
+        smb2_set_timeout(smb2, 0);
+
+        /* An ECHO reply has the same body as the request. Deliver only its
+         * header so the receiver is waiting for the body on the next tick. */
+        assert(recv(pair[1], prefix, sizeof(prefix), MSG_WAITALL) == sizeof(prefix));
+        prefix[SMB2_SPL_SIZE + 16] = SMB2_FLAGS_SERVER_TO_REDIR;
+        assert(write(pair[1], prefix, sizeof(prefix)) == sizeof(prefix));
+        assert(!smb2_service(smb2, POLLIN));
+        assert(!smb2->waitqueue && !smb2->outqueue && smb2->pdu);
+        assert(smb2->recv_state == SMB2_RECV_FIXED && !expired);
+        smb2->pdu->timeout = time(NULL) - 1;
+        if (sync_wait) {
+                assert(smb2_echo(smb2) == -ETIMEDOUT);
+        } else {
+                assert(smb2_service(smb2, 0) == -ETIMEDOUT);
+        }
+        assert(!SMB2_VALID_SOCKET(smb2_get_fd(smb2)));
+        smb2_destroy_context(smb2);
+        assert(expired == 1);
+        close(pair[1]);
+}
+
 static void partial_send_timeout(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
-        struct callbacks calls = {0};
+        int expired = 0;
         int pair[2];
 
         assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
         smb2->fd = pair[0];
         smb2->credits = 0;
         smb2_set_timeout(smb2, 5);
-        assert(!smb2_echo_async(smb2, completed, &calls));
+        assert(!smb2_echo_async(smb2, expect_timeout, &expired));
         assert(smb2->outqueue);
         smb2->outqueue->out.num_done = 1;
         smb2->outqueue->timeout = time(NULL) - 1;
         assert(smb2_service(smb2, 0) == -ETIMEDOUT);
         assert(!SMB2_VALID_SOCKET(smb2_get_fd(smb2)));
         smb2_destroy_context(smb2);
-        assert(calls.completed == 1);
+        assert(expired == 1);
         close(pair[1]);
 }
 
@@ -670,6 +706,8 @@ int main(void)
         close(pair[1]);
         sync_buffers_after_failed_wait();
         partial_send_timeout();
+        partial_reply_timeout(0);
+        partial_reply_timeout(1);
         release_from_cancel();
         release_with_queued_truncate();
         release_from_completion(0);

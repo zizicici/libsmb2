@@ -334,6 +334,8 @@ int smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents);
  * SMB2_STATUS_IO_TIMEOUT.
  * If you use timeouts with the async API you must make sure to call
  * smb2_service() at least once every second.
+ * If a partially transferred frame times out, smb2_service() returns
+ * -ETIMEDOUT. Destroy the context to complete its outstanding callbacks.
  *
  * Default is 0: No timeout.
  */

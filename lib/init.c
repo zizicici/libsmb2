@@ -581,7 +581,8 @@ void smb2_destroy_context(struct smb2_context *smb2)
         smb2_rdma_reset(smb2);
 
         /*
-         * Complete every PDU that is still queued with SMB2_STATUS_SHUTDOWN.
+         * Complete outstanding PDUs with SMB2_STATUS_SHUTDOWN, preserving
+         * the timeout on a partial frame that caused the connection to close.
          * A callback may queue another PDU (e.g. close a file when its read
          * fails), so repeat until all the queues are empty.
          */
@@ -590,6 +591,8 @@ void smb2_destroy_context(struct smb2_context *smb2)
                 while (smb2->outqueue) {
                         struct smb2_pdu *pdu = smb2->outqueue;
                         struct smb2_pdu *p;
+                        uint32_t status = pdu->timed_out ? SMB2_STATUS_IO_TIMEOUT
+                                                        : SMB2_STATUS_SHUTDOWN;
 
                         smb2->outqueue = pdu->next;
                         /*
@@ -599,8 +602,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
                          */
                         for (p = pdu; p; p = p->next_compound) {
                                 if (p->cb) {
-                                        p->cb(smb2, SMB2_STATUS_SHUTDOWN,
-                                              NULL, p->cb_data);
+                                        p->cb(smb2, status, NULL, p->cb_data);
                                 }
                         }
                         smb2_free_pdu(smb2, pdu);
@@ -610,8 +612,9 @@ void smb2_destroy_context(struct smb2_context *smb2)
 
                         smb2->pdu = NULL;
                         if (pdu->cb) {
-                                pdu->cb(smb2, SMB2_STATUS_SHUTDOWN, NULL,
-                                        pdu->cb_data);
+                                pdu->cb(smb2, pdu->timed_out ? SMB2_STATUS_IO_TIMEOUT
+                                                            : SMB2_STATUS_SHUTDOWN,
+                                        NULL, pdu->cb_data);
                         }
                         smb2_free_pdu(smb2, pdu);
                 }
