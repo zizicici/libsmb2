@@ -347,18 +347,11 @@ SMB2_ARMV8 static void smb2_armv8_cmac_iov(const uint8_t key[16], const struct s
 {
         struct smb2_aes128_keys rk;
         uint8_t sub_key1[16], sub_key2[16], last[16];
-        uint64_t n = (msg_len + 15) / 16;
-        uint64_t rem = msg_len % 16;
-        uint64_t i;
-        int complete = n != 0 && rem == 0;
         size_t v = 0, at = 0;
         uint8x16_t x = vdupq_n_u8(0);
 
         smb2_armv8_setup(key, &rk, sub_key1, sub_key2);
-        if (n == 0) {
-                n = 1;
-        }
-        for (i = 0; i < n - 1; i++) {
+        while (msg_len > 16) {
                 uint8x16_t m;
 
                 while (v < niov && at == iov[v].len) {
@@ -375,14 +368,15 @@ SMB2_ARMV8 static void smb2_armv8_cmac_iov(const uint8_t key[16], const struct s
                         m = vld1q_u8(block);
                 }
                 x = smb2_armv8_aes128_encrypt(veorq_u8(x, m), &rk);
+                msg_len -= 16;
         }
         memset(last, 0, 16);
-        if (complete) {
+        if (msg_len == 16) {
                 smb2_iov_gather(iov, niov, &v, &at, last, 16);
                 aes_cmac_xor(last, sub_key1);
         } else {
-                smb2_iov_gather(iov, niov, &v, &at, last, (size_t)rem);
-                last[rem] = 0x80;
+                smb2_iov_gather(iov, niov, &v, &at, last, (size_t)msg_len);
+                last[msg_len] = 0x80;
                 aes_cmac_xor(last, sub_key2);
         }
         x = smb2_armv8_aes128_encrypt(veorq_u8(x, vld1q_u8(last)), &rk);
