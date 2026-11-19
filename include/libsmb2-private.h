@@ -222,6 +222,10 @@ struct smb2_context {
         const char *domain;
         const char *workstation;
         char client_challenge[8];
+#ifdef __amigaos4__
+        uint8_t nonce_bytes[12 * 16];
+        size_t nonce_bytes_left;
+#endif
 
         void *opaque;
 
@@ -567,6 +571,7 @@ void smb2_free_iovector(struct smb2_context *smb2, struct smb2_io_vectors *v);
 
 /* Fill the entire buffer from a cryptographic source or return -1 with errno set. */
 int smb2_random_bytes(void *buf, size_t len);
+int smb2_random_nonce(struct smb2_context *smb2, void *buf, size_t len);
 
 void smb2_oplock_break_notify(struct smb2_context *smb2, int status, void *command_data, void *cb_data);
 
