@@ -13,6 +13,13 @@ noinst_PROGRAMS += sync-stat-unit
 
 noinst_PROGRAMS += set-info-unit
 
+noinst_PROGRAMS += entropy-unit iop-entropy-unit
+
+iop_entropy_unit_SOURCES = iop-entropy-unit.c ../lib/ps2/entropy.c \
+        ../lib/hmac.c ../lib/usha.c ../lib/sha224-256.c
+iop_entropy_unit_CFLAGS = $(AM_CFLAGS) -DUSE_SHA384_SHA512=0
+iop_entropy_unit_LDADD =
+
 EXTRA_PROGRAMS = ld_sockerr
 CLEANFILES = ld_sockerr.o ld_sockerr.so
 
