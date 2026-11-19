@@ -33,6 +33,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 
 #include <smb2/smb2.h>
@@ -58,6 +59,25 @@ static void *last_priv;
 static uint8_t sent[8192];
 static size_t sent_len;
 static int dummy_pdu;
+static uint32_t write_len;
+
+#ifdef SMB2_HAVE_IS_DISPATCHING
+static int dispatching;
+
+int
+smb2_is_dispatching(struct smb2_context *smb2 _U_)
+{
+        return dispatching;
+}
+
+/* The sync wait test loses its transport after the request is queued. */
+int
+smb2_service(struct smb2_context *smb2, int revents _U_)
+{
+        smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
+        return -ETIMEDOUT;
+}
+#endif
 
 struct smb2_pdu *
 smb2_cmd_create_async(struct smb2_context *smb2 _U_,
@@ -82,10 +102,21 @@ smb2_cmd_ioctl_async(struct smb2_context *smb2 _U_,
 }
 
 struct smb2_pdu *
+smb2_cmd_read_async(struct smb2_context *smb2 _U_,
+                    struct smb2_read_request *req _U_,
+                    smb2_command_cb cb, void *cb_data)
+{
+        last_cb = cb;
+        last_priv = cb_data;
+        return (struct smb2_pdu *)&dummy_pdu;
+}
+
+struct smb2_pdu *
 smb2_cmd_write_async(struct smb2_context *smb2 _U_,
-                     struct smb2_write_request *req _U_, int flags _U_,
+                     struct smb2_write_request *req, int flags _U_,
                      smb2_command_cb cb, void *cb_data)
 {
+        write_len = req->length;
         last_cb = cb;
         last_priv = cb_data;
         return (struct smb2_pdu *)&dummy_pdu;
@@ -103,6 +134,16 @@ void
 smb2_queue_pdu(struct smb2_context *smb2 _U_, struct smb2_pdu *pdu _U_)
 {
 }
+
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+static int queue_result;
+
+int
+smb2_queue_pdu_checked(struct smb2_context *smb2 _U_, struct smb2_pdu *pdu _U_)
+{
+        return queue_result;
+}
+#endif
 
 /* The replies the test hands over are malloc()ed */
 void
@@ -200,7 +241,7 @@ call_cb(struct dcerpc_context *dce _U_, int status, void *data,
         void *cb_data _U_)
 {
         cb_status = status;
-        cb_done = 1;
+        cb_done++;
         if (data) {
                 dcerpc_free_data(dce, data);
         }
@@ -219,6 +260,19 @@ req_coder(char *name _U_, struct dcerpc_context *dce,
         for (i = 0; i < STUB_LEN; i++) {
                 v = (uint8_t)(i * 7 + 1);
                 if (dcerpc_uint8_coder("b", dce, pdu, iov, &v)) {
+                        return -1;
+                }
+        }
+        return 0;
+}
+
+static int
+large_req_coder(char *name, struct dcerpc_context *dce,
+                struct dcerpc_pdu *pdu, struct dcerpc_iovec *iov, void *ptr)
+{
+        unsigned i;
+        for (i = 0; i < 250; i++) {
+                if (req_coder(name, dce, pdu, iov, ptr)) {
                         return -1;
                 }
         }
@@ -298,9 +352,17 @@ session_open(struct session *s, int level, int hsign, int ack_auth)
                                          &netlogon_syntax, call_cb, NULL)) {
                 return -1;
         }
+        last_cb(s->smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        if (cb_done) {
+                return -1;
+        }
         memset(&cr, 0, sizeof(cr));
         cr.file_id[0] = 1;
         last_cb(s->smb2, 0, &cr, last_priv);
+        last_cb(s->smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        if (cb_done) {
+                return -1;
+        }
         reply(s->smb2, 0, b, bind_ack(b, level, hsign, ack_auth));
         return cb_done ? cb_status : -1;
 }
@@ -316,6 +378,102 @@ session_call(struct session *s)
 }
 
 /* ---------------------------------------------------- the tests */
+
+#ifdef SMB2_HAVE_IS_DISPATCHING
+static int
+nested_call_coder(char *name, struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
+                  struct dcerpc_iovec *iov, void *ptr)
+{
+        CHECK(dcerpc_call(dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
+        sent_len = 0; /* Only the inner call reached the transport. */
+        return req_coder(name, dce, pdu, iov, ptr);
+}
+
+static void
+test_sync_wait(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        last_cb = NULL;
+        dispatching = 1;
+        CHECK(dcerpc_connect_context(s.dce, "netlogon", &netlogon_syntax) == -EDEADLK);
+        errno = 0;
+        CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
+        CHECK(errno == EDEADLK && last_cb == NULL);
+        dispatching = 0;
+        CHECK(dcerpc_call_async(s.dce, 0x15, nested_call_coder, NULL, rep_coder,
+                                8, call_cb, NULL) == -EIO);
+        CHECK(sent_len == 0 && last_cb != NULL);
+        CHECK(strstr(dcerpc_get_error(s.dce), "partial SMB frame") != NULL);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        CHECK(dcerpc_connect_context_async(s.dce, "netlogon", &netlogon_syntax,
+                                           call_cb, NULL) == -EIO);
+        memset(got, 0, sizeof(got));
+        reply(s.smb2, 0, rep_l5_hsign, sizeof(rep_l5_hsign));
+        CHECK(got[0] == 0);
+        session_close(&s);
+
+        s.smb2 = smb2_init_context();
+        s.dce = dcerpc_create_context(s.smb2);
+        CHECK(s.smb2 && s.dce);
+        CHECK(dcerpc_connect_context(s.dce, "netlogon", &netlogon_syntax) == -ETIMEDOUT);
+        CHECK(strstr(dcerpc_get_error(s.dce), "partial SMB frame") != NULL);
+        last_cb(s.smb2, SMB2_STATUS_SHUTDOWN, NULL, last_priv);
+        dcerpc_destroy_context(s.dce);
+        smb2_destroy_context(s.smb2);
+}
+#endif
+
+static void
+test_fragment_write(unsigned shortfall)
+{
+        struct session s;
+        struct smb2_write_reply written = {0};
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        cb_done = 0;
+        sent_len = write_len = 0;
+        CHECK(dcerpc_call_async(s.dce, 0x15, large_req_coder, NULL, rep_coder,
+                                8, call_cb, NULL) == 0);
+        CHECK(write_len > 1 && sent_len == 0 && cb_done == 0);
+        written.count = shortfall < write_len ? write_len - shortfall : 0;
+        last_cb(s.smb2, 0, &written, last_priv);
+        if (shortfall) {
+                CHECK(cb_done == 1 && cb_status == -EIO && sent_len == 0);
+                CHECK(session_call(&s) == -EIO && sent_len == 0);
+        } else {
+                CHECK(cb_done == 0 && sent_len > 0);
+                last_cb(s.smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+                CHECK(cb_done == 1 && cb_status < 0);
+        }
+        session_close(&s);
+}
+
+static void
+test_open_without_transport(void)
+{
+        struct dcerpc_context *dce = dcerpc_create_context(NULL);
+
+        CHECK(dce != NULL);
+        CHECK(dcerpc_open_async(dce, call_cb, NULL) == -EINVAL);
+        dcerpc_destroy_context(dce);
+}
+
+static void
+test_open_eof(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct dcerpc_context *dce = dcerpc_create_context(smb2);
+
+        CHECK(smb2 && dce);
+        cb_done = 0;
+        CHECK(dcerpc_connect_context_async(dce, "netlogon", &netlogon_syntax, call_cb, NULL) == 0);
+        last_cb(smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+        dcerpc_destroy_context(dce);
+        CHECK(cb_done == 1 && cb_status == -EIO);
+        smb2_destroy_context(smb2);
+}
 
 static void
 test_bind(void)
@@ -351,6 +509,41 @@ test_bind(void)
         session_close(&s);
 }
 
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+static void
+test_queue_rejection(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        queue_result = -EIO;
+        CHECK(session_call(&s) == -EIO);
+        queue_result = 0;
+        CHECK(!cb_done);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        session_close(&s);
+        CHECK(!cb_done);
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        queue_result = -EIO;
+        /* Only the first bytes fit in TRANSCEIVE. The follow-up READ fails. */
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 8);
+        CHECK(cb_done && cb_status == -EIO);
+        queue_result = 0;
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        session_close(&s);
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 8);
+        last_cb(s.smb2, SMB2_STATUS_IO_TIMEOUT, NULL, last_priv);
+        CHECK(cb_done == 1 && cb_status == -ETIMEDOUT);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        session_close(&s);
+}
+#endif
+
 static void
 test_signed(int hsign, const uint8_t *req, size_t req_len,
             const uint8_t *rep, size_t rep_len)
@@ -363,9 +556,29 @@ test_signed(int hsign, const uint8_t *req, size_t req_len,
         CHECK(session_call(&s) == 0);
         CHECK(sent_len == req_len && memcmp(sent, req, req_len) == 0);
         memset(got, 0, sizeof(got));
-        reply(s.smb2, 0, rep, rep_len);
+        last_cb(s.smb2, SMB2_STATUS_PENDING, NULL, last_priv);
+        CHECK(!cb_done);
+        if (!cb_done) {
+                reply(s.smb2, 0, rep, rep_len);
+        }
         CHECK(cb_done && cb_status == 0);
         CHECK(rep_stub_ok());
+        session_close(&s);
+}
+
+static void
+test_incomplete_reply_eof(void)
+{
+        struct session s;
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 16);
+        CHECK(cb_done == 0);
+        if (!cb_done) {
+                last_cb(s.smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+        }
+        CHECK(cb_done == 1 && cb_status == -EIO);
         session_close(&s);
 }
 
@@ -402,6 +615,15 @@ test_sealed(void)
         CHECK(cb_done && cb_status == 0);
         CHECK(rep_stub_ok());
         session_close(&s);
+}
+
+static void
+release_rpc_on_error(struct smb2_context *smb2, const char *message _U_)
+{
+        struct session *s = smb2_get_opaque(smb2);
+        smb2_register_error_callback(smb2, NULL);
+        dcerpc_destroy_context(s->dce);
+        s->dce = NULL;
 }
 
 static void
@@ -443,19 +665,33 @@ test_refused(void)
         put16(fault + 8, 32);
         put32(fault + 12, 3);
         put32(fault + 24, 0x1c010003);
+        smb2_set_opaque(s.smb2, &s);
+        smb2_register_error_callback(s.smb2, release_rpc_on_error);
         reply(s.smb2, 0, fault, sizeof(fault));
-        CHECK(cb_done && cb_status != 0);
+        CHECK(s.dce == NULL && cb_done == 1 && cb_status == -ECANCELED);
         session_close(&s);
 }
 
 int
 main(void)
 {
+        test_fragment_write(0);
+        test_fragment_write(1);
+        test_fragment_write(UINT32_MAX);
+        test_open_without_transport();
+        test_open_eof();
         test_bind();
+#ifdef SMB2_HAVE_IS_DISPATCHING
+        test_sync_wait();
+#endif
+#ifdef SMB2_HAVE_QUEUE_PDU_CHECKED
+        test_queue_rejection();
+#endif
         test_signed(1, req_l5_hsign, sizeof(req_l5_hsign),
                     rep_l5_hsign, sizeof(rep_l5_hsign));
         test_signed(0, req_l5_nohsign, sizeof(req_l5_nohsign),
                     rep_l5_nohsign, sizeof(rep_l5_nohsign));
+        test_incomplete_reply_eof();
         test_sealed();
         test_refused();
         if (failures) {
