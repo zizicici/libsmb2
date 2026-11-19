@@ -4960,7 +4960,7 @@ notify_change_cb(struct smb2_context *smb2, int status, void *command_data, void
                 rc = status;
         } else if (status) {
                 smb2_set_nterror(smb2, status, "Change notify failed: %s", nterror_to_str(status));
-                rc = -nterror_to_errno(status);
+                rc = command_error(status);
         } else if (!rep) {
                 rc = -EIO;
         } else {

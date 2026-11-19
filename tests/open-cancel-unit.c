@@ -191,6 +191,13 @@ static void timeout_batch(struct smb2_context *smb2)
         smb2->credits = 32;
 }
 
+static void expect_io_error(struct smb2_context *smb2, int status, void *reply, void *data)
+{
+        int *calls = data;
+        assert(status == -EIO && reply == NULL);
+        (*calls)++;
+}
+
 static void notify_done(struct smb2_context *smb2, int status, void *changes, void *data)
 {
         int *calls = data;
@@ -213,6 +220,10 @@ static void watch_across_tree_switch(struct smb2_context *smb2)
         reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_SUCCESS, &rep);
         reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_CANCELLED, NULL);
         assert(calls == 2);
+        assert(!smb2_notify_change_filehandle_async(smb2, fh, 0,
+                       SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 1, expect_io_error, &calls));
+        reply(smb2, SMB2_CHANGE_NOTIFY, SMB2_STATUS_END_OF_FILE, NULL);
+        assert(calls == 3 && !smb2->waitqueue && !smb2->outqueue);
 }
 
 static void watch_path_during_dispatch(struct smb2_context *smb2)
@@ -333,13 +344,6 @@ static void flush_after_tree_switch(struct smb2_context *smb2)
         reply(smb2, SMB2_FLUSH, 0, NULL);
         reply(smb2, SMB2_CLOSE, 0, NULL);
         assert(calls.completed == 2);
-}
-
-static void expect_io_error(struct smb2_context *smb2, int status, void *reply, void *data)
-{
-        int *calls = data;
-        assert(status == -EIO && reply == NULL);
-        (*calls)++;
 }
 
 static void nonread_eof(struct smb2_context *smb2)
