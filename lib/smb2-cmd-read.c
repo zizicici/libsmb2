@@ -250,8 +250,6 @@ smb2_process_read_fixed(struct smb2_context *smb2,
         struct smb2_read_reply *rep;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
-        size_t asked = 0;
-        int i;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size > SMB2_READ_REPLY_SIZE) {
@@ -296,12 +294,9 @@ smb2_process_read_fixed(struct smb2_context *smb2,
          * callers are told was read: more than was asked for would have
          * them use bytes their buffer does not hold.
          */
-        for (i = 0; i < pdu->in.niov; i++) {
-                asked += pdu->in.iov[i].len;
-        }
-        if (rep->data_length > asked) {
+        if (rep->data_length > pdu->in.total_size) {
                 smb2_set_error(smb2, "Read returned %u bytes, %zu were asked for",
-                               rep->data_length, asked);
+                               rep->data_length, pdu->in.total_size);
                 pdu->payload = NULL;
                 free(rep);
                 return -1;
