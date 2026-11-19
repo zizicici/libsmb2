@@ -4717,7 +4717,7 @@ disconnect_cb_2(struct smb2_context *smb2, int status,
                                  nterror_to_str(status));
         }
         smb2_close_context(smb2);
-        dc_data->cb(smb2, -nterror_to_errno(status), NULL, dc_data->cb_data);
+        dc_data->cb(smb2, status ? command_error(status) : 0, NULL, dc_data->cb_data);
         free(dc_data);
 }
 
@@ -4730,7 +4730,7 @@ disconnect_cb_1(struct smb2_context *smb2, int status,
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
-                dc_data->cb(smb2, -nterror_to_errno(status), NULL,
+                dc_data->cb(smb2, command_error(status), NULL,
                             dc_data->cb_data);
                 free(dc_data);
                 return;

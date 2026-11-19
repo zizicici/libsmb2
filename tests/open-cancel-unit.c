@@ -462,6 +462,10 @@ static void nonread_eof(struct smb2_context *smb2)
         reply(smb2, SMB2_SET_INFO, SMB2_STATUS_END_OF_FILE, NULL);
         reply(smb2, SMB2_CLOSE, SMB2_STATUS_END_OF_FILE, NULL);
         assert(calls == 3);
+        assert(!smb2_select_tree_id(smb2, 1));
+        assert(!smb2_disconnect_share_async(smb2, expect_io_error, &calls));
+        reply(smb2, SMB2_TREE_DISCONNECT, SMB2_STATUS_END_OF_FILE, NULL);
+        assert(calls == 4 && SMB2_VALID_SOCKET(smb2_get_fd(smb2)) && !smb2->waitqueue);
 }
 
 static void close_after_positioned_io(struct smb2_context *smb2)
