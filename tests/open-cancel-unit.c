@@ -849,6 +849,28 @@ static void partial_unmatched_reply(int encrypted)
         close(pair[1]);
 }
 
+static void missing_create_reply(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        int pair[2], expired = 0;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 8;
+        smb2_set_timeout(smb2, 10);
+        assert(!smb2_open_async(smb2, "file", O_RDONLY, expect_timeout, &expired));
+        smb2_set_timeout(smb2, 0);
+        smb2->waitqueue->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && expired == 1);
+        assert(smb2->waitqueue->timeout > time(NULL));
+        smb2->waitqueue->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == -ETIMEDOUT);
+        assert(!SMB2_VALID_SOCKET(smb2->fd));
+        smb2_destroy_context(smb2);
+        assert(expired == 1);
+        close(pair[1]);
+}
+
 static void partial_cancelled_create(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -964,6 +986,7 @@ int main(void)
         close(pair[1]);
         sync_buffers_after_failed_wait();
         sync_stat_after_failed_wait();
+        missing_create_reply();
         partial_cancelled_create();
         partial_unmatched_reply(0);
         partial_unmatched_reply(1);

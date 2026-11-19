@@ -460,6 +460,7 @@ struct smb2_pdu {
         unsigned char *crypt;
         time_t timeout;
         int cleanup_timeout; /* time allowed for a detached handle operation */
+        int waiting_for_late_create;
 };
 
 struct smb2_dirent_internal {

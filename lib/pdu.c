@@ -1350,7 +1350,7 @@ unmatched_frame_deadline(struct smb2_context *smb2, time_t now)
         }
         for (pdu = smb2->waitqueue; pdu; pdu = pdu->next) {
                 time_t end = pdu->timeout;
-                if (pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
+                if (!pdu->waiting_for_late_create && pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
                         end = now + pdu->cleanup_timeout;
                 }
                 if (end > deadline) {
@@ -1388,7 +1388,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         if (receiving && receiving->timeout && receiving->timeout < t) {
                 receiving->timed_out = 1;
                 smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
-                goto partial_frame;
+                goto retire_connection;
         }
 
         pdu = smb2->outqueue;
@@ -1399,7 +1399,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         if (pdu->out.num_done) {
                                 pdu->timed_out = 1;
                                 smb2_set_error(smb2, "Timed out sending a partial SMB frame");
-                                goto partial_frame;
+                                goto retire_connection;
                         }
                         if (smb2_expire_unsent_close(smb2, pdu)) {
                                 pdu = smb2->outqueue;
@@ -1437,8 +1437,14 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
          */
         pdu = smb2->waitqueue;
         while (pdu) {
-                if (pdu->timeout && pdu->timeout < t && !smb2_waiting_for_create_cleanup(pdu)) {
-                        if (smb2_expire_sent_create(smb2, pdu)) {
+                if (pdu->timeout && pdu->timeout < t) {
+                        if (pdu->waiting_for_late_create) {
+                                smb2_set_error(smb2, "Timed out waiting for the FileId of a detached CREATE");
+                                goto retire_connection;
+                        }
+                        if (smb2_waiting_for_create_cleanup(pdu) || smb2_expire_sent_create(smb2, pdu)) {
+                                pdu->waiting_for_late_create = 1;
+                                pdu->timeout = t + pdu->cleanup_timeout;
                                 pdu = smb2->waitqueue;
                                 continue;
                         }
@@ -1458,16 +1464,15 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         }
         if (smb2->frame_deadline && smb2->frame_deadline < t) {
                 smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
-                goto partial_frame;
+                goto retire_connection;
         }
         smb2_timeout_file_io(smb2, t);
         smb2->servicing = servicing;
         smb2_finish_dispatch(smb2);
         return 0;
 
-partial_frame:
-        /* The stream cannot skip the rest of a frame. Context destruction
-         * will complete outstanding requests once the dispatcher unwinds. */
+retire_connection:
+        /* Teardown completes outstanding requests and releases remote handles. */
         smb2_close_context(smb2);
         smb2->servicing = servicing;
         smb2_finish_dispatch(smb2);
