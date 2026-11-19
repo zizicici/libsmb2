@@ -398,6 +398,39 @@ static void deferred_io_timeout(struct smb2_context *smb2, int positioned)
         assert(calls.completed == 1 && expired == 1);
 }
 
+static void mixed_io_timeouts(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        int pair[2];
+        struct callbacks calls = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        int expired = 0, i;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        assert(!smb2_connect_tree_id(smb2, 2) && !smb2_connect_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh && !smb2_fsync_async(smb2, fh, completed, &calls));
+        for (i = 0; i < 8; i++) {
+                smb2_set_timeout(smb2, 60);
+                assert(!smb2_fsync_async(smb2, fh, completed, &calls));
+                smb2_set_timeout(smb2, -1);
+                assert(!smb2_fsync_async(smb2, fh, expect_timeout, &expired));
+        }
+        smb2_set_timeout(smb2, 0);
+        assert(!smb2_service(smb2, 0) && expired == 8);
+        for (i = 0; i < 9; i++) {
+                reply(smb2, SMB2_FLUSH, 0, NULL);
+        }
+        assert(calls.completed == 9 && !smb2->io_timers);
+        assert(!smb2_close_async(smb2, fh, completed, &calls));
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        smb2_destroy_context(smb2);
+        close(pair[1]);
+}
+
 static void promoted_io_timeout(struct smb2_context *smb2)
 {
         struct callbacks calls = {0};
@@ -820,6 +853,7 @@ int main(void)
         reject_first_io(smb2, 0);
         reject_first_io(smb2, 1);
         nonread_eof(smb2);
+        mixed_io_timeouts();
         promoted_io_timeout(smb2);
         close_waiting_for_credit(smb2);
         deferred_io_timeout(smb2, 0);

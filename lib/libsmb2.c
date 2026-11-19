@@ -2139,7 +2139,7 @@ smb2_open_async(struct smb2_context *smb2, const char *path, int flags,
  * byte count of the previous operation. A flush or close submitted behind
  * them must also wait for writes which have not reached the server yet. */
 struct file_io {
-        struct file_io *next;
+        struct file_io *prev, *next;
         struct file_io *timer_prev, *timer_next;
         time_t deadline;
         struct smb2fh *fh;
@@ -2181,6 +2181,10 @@ start_io_timer(struct smb2_context *smb2, struct file_io *io)
 static void
 remove_io_timer(struct smb2_context *smb2, struct file_io *io)
 {
+        /* A completion callback can also promote or remove the next timer. */
+        if (smb2->next_io_timer == io) {
+                smb2->next_io_timer = io->timer_next;
+        }
         if (io->timer_prev) {
                 io->timer_prev->timer_next = io->timer_next;
         } else {
@@ -2213,37 +2217,37 @@ expire_deferred_close(struct smb2_context *smb2, struct file_io *io)
 void
 smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
 {
-        struct file_io *io = smb2->io_timers;
+        struct file_io *io;
 
-        while (io) {
+        for (io = smb2->io_timers; io; io = smb2->next_io_timer) {
                 struct smb2fh *fh = io->fh;
-                struct file_io *prev;
                 void *args = NULL;
 
+                smb2->next_io_timer = io->timer_next;
                 if (io->deadline >= now) {
-                        io = io->timer_next;
                         continue;
                 }
                 remove_io_timer(smb2, io);
                 if (io->command == SMB2_CLOSE) {
                         expire_deferred_close(smb2, io);
-                        io = smb2->io_timers;
                         continue;
                 }
-                for (prev = fh->io_head; prev->next != io; prev = prev->next) {
-                }
-                prev->next = io->next;
-                if (fh->io_tail == io) {
-                        fh->io_tail = prev;
+                /* A deferred non-CLOSE always has a preceding file operation. */
+                io->prev->next = io->next;
+                if (io->next) {
+                        io->next->prev = io->prev;
+                } else {
+                        fh->io_tail = io->prev;
                 }
                 if (io->command == SMB2_READ) {
                         args = &io->args.read;
                 } else if (io->command == SMB2_WRITE) {
                         args = &io->args.write;
                 }
-                io->cb(smb2, -ETIMEDOUT, args, io->cb_data);
+                if (io->cb) {
+                        io->cb(smb2, -ETIMEDOUT, args, io->cb_data);
+                }
                 free(io);
-                io = smb2->io_timers; /* callbacks can change either queue */
         }
 }
 
@@ -2497,6 +2501,7 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                 }
                 fh->io_head = next;
                 if (next) {
+                        next->prev = NULL;
                         if (next->seek_generation == io->seek_generation) {
                                 next->offset = io->offset;
                         }
@@ -2583,6 +2588,7 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
         }
         if (!position && fh->io_tail) {
                 start_io_timer(smb2, io);
+                io->prev = fh->io_tail;
                 fh->io_tail->next = io;
                 fh->io_tail = io;
                 return 0;
