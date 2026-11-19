@@ -172,6 +172,7 @@ struct smb2_context {
         const struct addrinfo *next_addrinfo;
 
         int timeout;
+        unsigned num_timed_links;
 
 #ifdef HAVE_LIBQUIC
         /* "quic" URL argument: SMB2 over QUIC (MS-SMB2 2.1) using the
@@ -447,6 +448,8 @@ struct smb2_pdu {
         uint32_t crypt_len;
         unsigned char *crypt;
         time_t timeout;
+        int cleanup_timeout;
+        int cleanup_pending;
 };
 
 struct smb2_dirent_internal {
@@ -843,7 +846,9 @@ int smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
 
 int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
-void smb2_timeout_pdus(struct smb2_context *smb2);
+int smb2_timeout_pdus(struct smb2_context *smb2);
+int smb2_expire_link_request(struct smb2_context *smb2, struct smb2_pdu *pdu,
+                             int sent, time_t now);
 
 struct connect_data;                                           /* defined in libsmb2.c */
 void free_c_data(struct smb2_context*, struct connect_data*);  /* defined in libsmb2.c */

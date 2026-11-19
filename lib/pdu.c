@@ -1275,7 +1275,7 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 }
 
-void smb2_timeout_pdus(struct smb2_context *smb2)
+int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu, *next;
         time_t t = time(NULL);
@@ -1286,6 +1286,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 if (pdu->timeout && pdu->timeout < t) {
                         struct smb2_pdu *p;
 
+                        int rc = smb2_expire_link_request(smb2, pdu, 0, t);
+                        if (rc) {
+                                /* The callback may have changed either queue. */
+                                return rc < 0 ? -1 : 0;
+                        }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         /*
                          * An unsent compound is still chained: like
@@ -1317,6 +1322,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
         while (pdu) {
                 next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
+                        int rc = smb2_expire_link_request(smb2, pdu, 1, t);
+                        if (rc) {
+                                /* The callback may have changed either queue. */
+                                return rc < 0 ? -1 : 0;
+                        }
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         if (pdu->cb) {
                                 pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
@@ -1328,5 +1338,5 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 }
                 pdu = next;
         }
+        return 0;
 }
-

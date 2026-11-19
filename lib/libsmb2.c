@@ -3538,6 +3538,7 @@ struct symlink_cb_data {
         struct smb2_pdu *close_pdu;
         int opened;
         int delete_on_close;
+        int timed;
         /* Both compound replies must arrive before the handle is disposed. */
         int pending;
 };
@@ -3556,14 +3557,19 @@ link_finish(struct smb2_context *smb2, struct symlink_cb_data *data,
         if (data->status != SMB2_STATUS_SUCCESS) {
                 status = data->status;
         }
-        if (status != SMB2_STATUS_SUCCESS) {
+        if (data->cb && status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Link operation failed: %s",
                                  nterror_to_str(status));
         }
         if (data->close_pdu) {
                 smb2_free_pdu(smb2, data->close_pdu);
         }
-        data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
+        if (data->timed) {
+                smb2->num_timed_links--;
+        }
+        if (data->cb) {
+                data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
+        }
         free_symlink_data(data);
 }
 
@@ -3584,7 +3590,7 @@ link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
 
         data->close_pdu = NULL;
         smb2_set_close_file_id(pdu, data->file_id);
-        pdu->timeout = smb2->timeout ? time(NULL) + smb2->timeout : 0;
+        pdu->timeout = pdu->cleanup_timeout ? time(NULL) + pdu->cleanup_timeout : 0;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
@@ -3604,9 +3610,18 @@ link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
                 free_symlink_data(data);
                 return -ENOMEM;
         }
+        if (create->timeout) {
+                create->cleanup_timeout = smb2->timeout > 0 ? smb2->timeout : 1;
+                data->close_pdu->cleanup_timeout = create->cleanup_timeout;
+                smb2->num_timed_links++;
+                data->timed = 1;
+        }
         smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
         smb2_queue_pdu(smb2, create);
         if (smb2->queue_rejected) {
+                if (data->timed) {
+                        smb2->num_timed_links--;
+                }
                 smb2_free_pdu(smb2, data->close_pdu);
                 free_symlink_data(data);
                 return -EIO;
@@ -3696,6 +3711,39 @@ link_open_cb(struct smb2_context *smb2, int status,
         link_request_done(smb2, data, status);
 }
 
+/* An accepted CREATE can still return a FileId after the caller times out.
+ * Keep it, or a CLOSE waiting for send credits, for one cleanup interval. */
+int
+smb2_expire_link_request(struct smb2_context *smb2, struct smb2_pdu *pdu,
+                         int sent, time_t now)
+{
+        struct symlink_cb_data *data;
+        smb2_command_cb cb;
+        void *private_data;
+
+        if (pdu->cleanup_pending) {
+                smb2_set_error(smb2, "Timed out waiting for link handle cleanup");
+                smb2_close_context(smb2);
+                return -1;
+        }
+        if (!pdu->cleanup_timeout ||
+            (sent ? pdu->cb != link_open_cb : pdu->cb != link_close_cb)) {
+                return 0;
+        }
+        pdu->cleanup_pending = 1;
+        pdu->timeout = now + pdu->cleanup_timeout;
+        data = pdu->cb_data;
+        cb = data->cb;
+        private_data = data->cb_data;
+        data->cb = NULL;
+        data->cb_data = NULL;
+        if (cb) {
+                smb2_set_nterror(smb2, SMB2_STATUS_IO_TIMEOUT, "Link operation timed out");
+                cb(smb2, -ETIMEDOUT, NULL, private_data);
+        }
+        return 1;
+}
+
 static void
 symlink_ioctl_cb(struct smb2_context *smb2, int status,
                  void *command_data _U_, void *private_data)
@@ -3729,7 +3777,7 @@ unlink_dir_tag_cb(struct smb2_context *smb2, int status,
                 } else {
                         smb2_set_stat_type(&st, tag->file_attributes, tag->reparse_tag);
                         if (st.smb2_type == SMB2_TYPE_LINK && tag->reparse_tag != 0) {
-                                data->delete_on_close = 1;
+                                data->delete_on_close = data->cb != NULL;
                         } else {
                                 status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
                         }
@@ -3738,6 +3786,7 @@ unlink_dir_tag_cb(struct smb2_context *smb2, int status,
         } else if (status == SMB2_STATUS_NOT_SUPPORTED ||
                    status == SMB2_STATUS_INVALID_INFO_CLASS ||
                    status == SMB2_STATUS_NOT_IMPLEMENTED) {
+                /* The first CREATE already identified a directory. */
                 status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
         }
         link_request_done(smb2, data, status);
