@@ -9,9 +9,7 @@
 
 static int mac(struct iop_rng *rng, const uint8_t *input, size_t len, uint8_t *result)
 {
-    HMACContext ctx;
-    return hmacReset(&ctx, SHA256, rng->key, sizeof(rng->key)) ||
-           hmacInput(&ctx, input, len) || hmacResult(&ctx, result);
+    return hmac(SHA256, input, len, rng->key, sizeof(rng->key), result);
 }
 
 static int update(struct iop_rng *rng, const void *seed, size_t len)
