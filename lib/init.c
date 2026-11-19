@@ -45,7 +45,6 @@
 #include <sys/unistd.h>
 #endif
 
-#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -363,7 +362,7 @@ smb2_set_random_provider(smb2_random_provider provider)
 }
 
 int
-smb2_random_bytes(void *buf, size_t len)
+smb2_random_bytes(void *buf, uint32_t len)
 {
         uint8_t *p = buf;
 
@@ -376,15 +375,10 @@ smb2_random_bytes(void *buf, size_t len)
                 return 0;
         }
 #if defined(_WIN32) && !defined(_XBOX) && !defined(_WIN32_WCE)
-        while (len) {
-                ULONG n = len > ULONG_MAX ? ULONG_MAX : (ULONG)len;
-                if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, p, n,
+        if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, p, len,
                                             BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-                        errno = EIO;
-                        return -1;
-                }
-                p += n;
-                len -= n;
+                errno = EIO;
+                return -1;
         }
         return 0;
 #elif defined(SMB2_ESP_WIFI_RANDOM)

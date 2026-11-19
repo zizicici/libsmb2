@@ -573,7 +573,7 @@ void smb2_set_close_file_id(struct smb2_pdu *pdu, const smb2_file_id file_id);
 void smb2_free_iovector(struct smb2_context *smb2, struct smb2_io_vectors *v);
 
 /* Fill the entire buffer from a cryptographic source or return -1 with errno set. */
-int smb2_random_bytes(void *buf, size_t len);
+int smb2_random_bytes(void *buf, uint32_t len);
 int smb2_random_nonce(struct smb2_context *smb2, void *buf, int use_gcm);
 
 void smb2_oplock_break_notify(struct smb2_context *smb2, int status, void *command_data, void *cb_data);
