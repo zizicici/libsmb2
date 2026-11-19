@@ -402,13 +402,6 @@ void smb3_aes_cmac_128(uint8_t key[AES128_KEY_LEN],
                 return;
         }
 #endif
-#if SMB2_ARMV8_AES && !defined(HAVE_OPENSSL)
-        if (smb2_armv8_available()) {
-                const struct smb2_iovec iov = {msg, (size_t)msg_len, NULL};
-                smb2_armv8_cmac_iov(key, &iov, 1, msg_len, mac);
-                return;
-        }
-#endif
         uint8_t sub_key1[AES128_KEY_LEN] = {0};
         uint8_t sub_key2[AES128_KEY_LEN] = {0};
         uint8_t scratch[AES128_KEY_LEN] = {0};
