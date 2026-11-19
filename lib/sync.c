@@ -167,6 +167,23 @@ static void sync_generic_status_cb(struct smb2_context *smb2, int status,
         cb_data->status = status;
 }
 
+static int finish_sync_status(struct smb2_context *smb2,
+                              struct sync_cb_data *data, int rc)
+{
+        if (rc >= 0) {
+                rc = wait_for_reply(smb2, data);
+                if (rc < 0 && !data->is_finished) {
+                        data->status = SMB2_STATUS_CANCELLED;
+                        return rc;
+                }
+                if (rc == 0) {
+                        rc = data->status;
+                }
+        }
+        free(data);
+        return rc;
+}
+
 /*
  * Connect to the server and mount the share.
  */
@@ -176,27 +193,14 @@ int smb2_connect_share(struct smb2_context *smb2,
                        const char *user)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
                 return -errno;
         }
 	rc = smb2_connect_share_async(smb2, server, share, user, sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 /*
@@ -205,7 +209,7 @@ int smb2_connect_share(struct smb2_context *smb2,
 int smb2_disconnect_share(struct smb2_context *smb2)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -213,20 +217,7 @@ int smb2_disconnect_share(struct smb2_context *smb2)
         }
 
 	rc = smb2_disconnect_share_async(smb2, sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 /*
@@ -289,7 +280,7 @@ struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
 int smb2_close(struct smb2_context *smb2, struct smb2fh *fh)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -297,25 +288,7 @@ int smb2_close(struct smb2_context *smb2, struct smb2fh *fh)
         }
 
 	rc = smb2_close_async(smb2, fh, sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                if (cb_data->is_finished) {
-                        goto out;
-                }
-                /* The queued CLOSE frees cb_data when its callback runs. */
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 /*
@@ -324,7 +297,7 @@ int smb2_close(struct smb2_context *smb2, struct smb2fh *fh)
 int smb2_fsync(struct smb2_context *smb2, struct smb2fh *fh)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -332,21 +305,7 @@ int smb2_fsync(struct smb2_context *smb2, struct smb2fh *fh)
         }
 
 	rc = smb2_fsync_async(smb2, fh, sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 /* A failed wait can leave the PDU in flight or behind an earlier file
@@ -424,7 +383,7 @@ int smb2_write(struct smb2_context *smb2, struct smb2fh *fh,
 int smb2_unlink(struct smb2_context *smb2, const char *path)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -433,27 +392,13 @@ int smb2_unlink(struct smb2_context *smb2, const char *path)
 
 	rc = smb2_unlink_async(smb2, path,
                                sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_rmdir(struct smb2_context *smb2, const char *path)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -462,27 +407,13 @@ int smb2_rmdir(struct smb2_context *smb2, const char *path)
 
 	rc = smb2_rmdir_async(smb2, path,
                               sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_mkdir(struct smb2_context *smb2, const char *path)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -491,21 +422,7 @@ int smb2_mkdir(struct smb2_context *smb2, const char *path)
 
 	rc = smb2_mkdir_async(smb2, path,
                               sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 /* Compound QUERY_INFO callbacks can still populate the result after a wait
@@ -586,7 +503,7 @@ int smb2_rename(struct smb2_context *smb2, const char *oldpath,
                 const char *newpath)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -595,28 +512,14 @@ int smb2_rename(struct smb2_context *smb2, const char *oldpath,
 
 	rc = smb2_rename_async(smb2, oldpath, newpath,
                                sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_symlink(struct smb2_context *smb2, const char *target,
                  const char *linkpath, uint32_t flags)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -625,28 +528,14 @@ int smb2_symlink(struct smb2_context *smb2, const char *target,
 
         rc = smb2_symlink_async(smb2, target, linkpath, flags,
                                 sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-        }
-
-        rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-        }
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-        return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_link(struct smb2_context *smb2, const char *oldpath,
                 const char *newpath)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -655,21 +544,7 @@ int smb2_link(struct smb2_context *smb2, const char *oldpath,
 
 	rc = smb2_link_async(smb2, oldpath, newpath,
                                sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_statvfs(struct smb2_context *smb2, const char *path,
@@ -690,7 +565,7 @@ int smb2_truncate(struct smb2_context *smb2, const char *path,
                   uint64_t length)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -699,28 +574,14 @@ int smb2_truncate(struct smb2_context *smb2, const char *path,
 
 	rc = smb2_truncate_async(smb2, path, length,
                                  sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 int smb2_ftruncate(struct smb2_context *smb2, struct smb2fh *fh,
                    uint64_t length)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -729,21 +590,7 @@ int smb2_ftruncate(struct smb2_context *smb2, struct smb2fh *fh,
 
 	rc = smb2_ftruncate_async(smb2, fh, length,
                                   sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 struct sync_readlink_cb_data {
@@ -951,7 +798,7 @@ int smb2_server_side_copy(struct smb2_context *smb2,
 int smb2_echo(struct smb2_context *smb2)
 {
         struct sync_cb_data *cb_data;
-        int rc = 0;
+        int rc;
 
         cb_data = new_sync_cb_data(smb2);
         if (cb_data == NULL) {
@@ -965,21 +812,7 @@ int smb2_echo(struct smb2_context *smb2)
         }
 
         rc = smb2_echo_async(smb2, sync_generic_status_cb, cb_data);
-        if (rc < 0) {
-                goto out;
-	}
-
-	rc = wait_for_reply(smb2, cb_data);
-        if (rc < 0) {
-                cb_data->status = SMB2_STATUS_CANCELLED;
-                return rc;
-	}
-
-        rc = cb_data->status;
- out:
-        free(cb_data);
-
-	return rc;
+        return finish_sync_status(smb2, cb_data, rc);
 }
 
 static void sync_notify_change_cb(struct smb2_context *smb2, int status,
