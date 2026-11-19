@@ -106,6 +106,7 @@ SYS=
 
 case $host in
   *solaris*)
+    LIBSOCKET="-lsocket -lnsl"
     AC_CHECK_LIB([socket], [main], , [AC_MSG_ERROR([Can not find required library])])
     AC_CHECK_LIB([nsl],    [main], , [AC_MSG_ERROR([Can not find required library])])
     ;;
@@ -224,6 +225,55 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ], [
     AC_MSG_NOTICE([Build WITHOUT OpenSSL])
 ])
+SMB2_PC_REQUIRES=""
+SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
+AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC$MAYBE_LIBKRB5$MAYBE_LIBRDMACM"], [
+    AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
+])
+AS_CASE([$MAYBE_LIBKRB5], [*gssapi_krb5*], [
+    for module in mit-krb5-gssapi krb5-gssapi; do
+        AS_IF([test -n "$PKG_CONFIG"], [
+            AS_CASE([`"$PKG_CONFIG" --libs-only-l "$module" 2>/dev/null`], [*-lgssapi_krb5*], [
+                SMB2_PC_REQUIRES="$module"
+                break
+            ])
+        ])
+    done
+])
+AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
+    AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
+        SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }libcrypto >= 3"
+        SMB2_PC_CRYPTO_LIBS=""
+    ])
+])
+SMB2_PC_QUIC_LIBS="$MAYBE_LIBQUIC"
+AS_IF([test -n "$MAYBE_LIBQUIC" && test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists gnutls], [
+    SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }gnutls"
+    SMB2_PC_QUIC_LIBS="-lquic"
+])
+AS_IF([test -n "$MAYBE_LIBRDMACM" && test -n "$PKG_CONFIG"], [
+    for module in librdmacm libibverbs; do
+        AS_IF(["$PKG_CONFIG" --exists "$module"], [
+            SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }$module"
+        ])
+    done
+])
+dnl Preserve search paths for private libraries not supplied by a .pc file.
+SMB2_PC_LIBDIRS=""
+AS_IF([test -n "$SMB2_PC_QUIC_LIBS$MAYBE_LIBRDMACM$SMB2_PC_CRYPTO_LIBS$MAYBE_LIBKRB5"], [
+    expect_libdir=no
+    for flag in $LDFLAGS; do
+        AS_IF([test "$expect_libdir" = yes], [
+            SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS -L$flag"
+            expect_libdir=no
+        ], [
+            AS_CASE([$flag], [-L], [expect_libdir=yes],
+                    [-L*], [SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS $flag"])
+        ])
+    done
+])
+AC_SUBST([SMB2_PC_PRIVATE_LIBS], ["$SMB2_PC_LIBDIRS $MAYBE_LIBKRB5 $SMB2_PC_QUIC_LIBS $MAYBE_LIBRDMACM $SMB2_PC_CRYPTO_LIBS $LIBSOCKET"])
+AC_SUBST([SMB2_PC_REQUIRES])
 AC_SUBST([MAYBE_LIBCRYPTO])
 AC_SUBST([LIBSOCKET])
 
