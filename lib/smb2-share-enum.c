@@ -693,7 +693,6 @@ share_enum_read_cb(struct smb2_context *smb2, int status,
 static int
 share_enum_read_more(struct share_enum *se)
 {
-        struct smb2_context *smb2 = se->smb2;
         struct smb2_read_request req;
         struct smb2_pdu *pdu;
 
@@ -708,17 +707,11 @@ share_enum_read_more(struct share_enum *se)
         req.length = SE_FRAG_READ_SIZE;
         req.buf = se->readbuf;
         req.channel = SMB2_CHANNEL_NONE;
-        pdu = smb2_cmd_read_async(smb2, &req, share_enum_read_cb, se);
+        pdu = smb2_cmd_read_async(se->smb2, &req, share_enum_read_cb, se);
         if (pdu == NULL) {
                 return -1;
         }
-        /* Queueing can fail the PDU synchronously (e.g. sealing without
-         * keys): the callback frees `se` before smb2_queue_pdu_final() returns,
-         * so only the hoisted context may be touched afterwards. */
-        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
-                return -EIO;
-        }
-        return 0;
+        return smb2_queue_pdu_final(se->smb2, pdu) < 0 ? -EIO : 0;
 }
 
 static void
@@ -926,16 +919,7 @@ share_enum_send_bind(struct share_enum *se)
         if (pdu == NULL) {
                 return -ENOMEM;
         }
-        /* Same as share_enum_read_more(): the callback frees `se` when
-         * queueing fails the PDU synchronously. */
-        {
-                struct smb2_context *smb2 = se->smb2;
-
-                if (smb2_queue_pdu_final(smb2, pdu) < 0) {
-                        return -EIO;
-                }
-        }
-        return 0;
+        return smb2_queue_pdu_final(se->smb2, pdu) < 0 ? -EIO : 0;
 }
 
 static void
