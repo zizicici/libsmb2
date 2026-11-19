@@ -265,12 +265,22 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ])
 SMB2_PC_REQUIRES=""
 SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
-AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC"], [
+AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC$MAYBE_LIBKRB5"], [
     AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
+])
+AS_CASE([$MAYBE_LIBKRB5], [*gssapi_krb5*], [
+    for module in mit-krb5-gssapi krb5-gssapi; do
+        AS_IF([test -n "$PKG_CONFIG"], [
+            AS_CASE([`"$PKG_CONFIG" --libs-only-l "$module" 2>/dev/null`], [*-lgssapi_krb5*], [
+                SMB2_PC_REQUIRES="$module"
+                break
+            ])
+        ])
+    done
 ])
 AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
     AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
-        SMB2_PC_REQUIRES="libcrypto >= 3"
+        SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }libcrypto >= 3"
         SMB2_PC_CRYPTO_LIBS=""
     ], [
         crypto_search_dirs=""
