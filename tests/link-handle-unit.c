@@ -41,6 +41,8 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
                   void *data, struct result *result, int id_offset)
 {
         struct smb2_pdu *pdu = smb2->waitqueue;
+        smb2_command_cb cb;
+        void *cb_data;
 
         assert(pdu && pdu->header.command == command && pdu->header.sync.tree_id == original_tree);
         if (id_offset >= 0) {
@@ -66,10 +68,10 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
         if (smb2->passthrough) {
                 assert(!pdu->report_pending);
         }
-        smb2->waitqueue = pdu->next;
-        pdu->next = NULL;
-        pdu->cb(smb2, status, data, pdu->cb_data);
+        cb = pdu->cb;
+        cb_data = pdu->cb_data;
         smb2_free_pdu(smb2, pdu);
+        cb(smb2, status, data, cb_data);
 }
 
 static void run(struct smb2_context *smb2, enum operation op)
@@ -179,6 +181,34 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         assert(result.completed == 1 && !smb2->waitqueue);
 }
 
+/* If the server never returns the CREATE, disconnect after the grace period. */
+static void missing_link_create(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct result result = {0};
+        struct smb2_pdu *create;
+        int pair[2];
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 16;
+        assert(!smb2_connect_tree_id(smb2, original_tree));
+        smb2_set_timeout(smb2, 30);
+        assert(!smb2_symlink_async(smb2, "target", "link", 0, completed, &result));
+        create = smb2->waitqueue;
+        assert(create && create->next);
+        create->timeout = create->next->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0));
+        assert(result.completed == 1 && result.status == -ETIMEDOUT);
+        assert(!smb2_service(smb2, 0));
+        create->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) < 0);
+        assert(!SMB2_VALID_SOCKET(smb2->fd));
+        smb2_destroy_context(smb2);
+        assert(result.completed == 1);
+        close(pair[1]);
+}
+
 int main(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -203,5 +233,6 @@ int main(void)
         }
         smb2_destroy_context(smb2);
         close(sockets[1]);
+        missing_link_create();
         return 0;
 }
