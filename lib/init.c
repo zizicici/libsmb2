@@ -94,6 +94,7 @@
 #include <switch/services/csrng.h>
 #elif defined(__3DS__)
 #include <3ds/types.h>
+#include <3ds/synchronization.h>
 #include <3ds/result.h>
 #include <3ds/services/ps.h>
 #elif defined(ESP_PLATFORM)
@@ -410,11 +411,15 @@ smb2_random_bytes(void *buf, size_t len)
                         csrngExit();
                 }
 #else
+                /* libctru increments its reference count before publishing the handle. */
+                static LightLock ps_lock = 1;
+                LightLock_Lock(&ps_lock);
                 rc = psInit();
                 if (R_SUCCEEDED(rc)) {
                         rc = PS_GenerateRandomBytes(p, len);
                         psExit();
                 }
+                LightLock_Unlock(&ps_lock);
 #endif
                 if (R_FAILED(rc)) {
                         errno = EIO;
