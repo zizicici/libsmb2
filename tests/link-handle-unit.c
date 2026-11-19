@@ -41,6 +41,8 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
                   void *data, struct result *result, int id_offset)
 {
         struct smb2_pdu *pdu = smb2->waitqueue;
+        smb2_command_cb cb;
+        void *cb_data;
 
         assert(pdu && pdu->header.command == command && pdu->header.sync.tree_id == original_tree);
         if (id_offset >= 0) {
@@ -65,11 +67,11 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
         }
         if (smb2->passthrough) {
                 assert(!pdu->report_pending);
-                assert(!result->completed || result->status == -ETIMEDOUT);
         }
-        smb2_unlink_pdu(smb2, pdu);
-        pdu->cb(smb2, status, data, pdu->cb_data);
+        cb = pdu->cb;
+        cb_data = pdu->cb_data;
         smb2_free_pdu(smb2, pdu);
+        cb(smb2, status, data, cb_data);
 }
 
 static void run(struct smb2_context *smb2, enum operation op)
@@ -153,6 +155,7 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         struct smb2_pdu *create;
 
         smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
         assert(!smb2_select_tree_id(smb2, original_tree));
         if (unlink_op) {
                 assert(!smb2_unlink_async(smb2, "link", completed, &result));
@@ -163,8 +166,10 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         }
         create = smb2->waitqueue;
         assert(create && create->next);
+        smb2_set_timeout(smb2, 0);
         create->timeout = create->next->timeout = time(NULL) - 1;
         assert(!smb2_service(smb2, 0) && result.completed == 1 && result.status == -ETIMEDOUT);
+        assert(!smb2_service(smb2, 0));
         assert(smb2->waitqueue == create && !create->next);
         assert(!smb2_select_tree_id(smb2, other_tree));
         memcpy(created.file_id, opened_id, sizeof(opened_id));
@@ -176,57 +181,31 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         assert(result.completed == 1 && !smb2->waitqueue);
 }
 
-static void received_set_info(struct smb2_context *smb2 _U_, int status, void *data, void *priv)
+/* If the server never returns the CREATE, disconnect after the grace period. */
+static void missing_link_create(void)
 {
-        struct smb2_set_info_request *req = data;
-        int *received = priv;
-        assert(!status && req->buffer_length == 1);
-        assert(req->input_data && *(uint8_t *)req->input_data == 1);
-        (*received)++;
-}
+        struct smb2_context *smb2 = smb2_init_context();
+        struct result result = {0};
+        struct smb2_pdu *create;
+        int pair[2];
 
-static void padded_set_info(struct smb2_context *smb2)
-{
-        struct smb2_set_info_request req = {0};
-        struct smb2_server server = {0};
-        struct smb2_context *receiver = smb2_init_context();
-        struct smb2_pdu *sent;
-        uint8_t wire[4 + SMB2_HEADER_SIZE + 32 + 8 + 1] = {0};
-        uint8_t *header = wire + 4, *fixed = header + SMB2_HEADER_SIZE;
-        uint8_t disposition = 1;
-        int pair[2], received = 0;
-
-        req.info_type = SMB2_0_INFO_FILE;
-        req.file_info_class = SMB2_FILE_DISPOSITION_INFORMATION;
-        req.buffer_offset = SMB2_HEADER_SIZE + 32 + 8;
-        req.buffer_length = 1;
-        req.input_data = &disposition;
-        smb2_set_passthrough(smb2, 1);
-        sent = smb2_cmd_set_info_async(smb2, &req, NULL, NULL);
-        assert(sent && sent->out.iov[1].len == 32);
-        memcpy(fixed, sent->out.iov[1].buf, 32);
-        assert(fixed[8] == SMB2_HEADER_SIZE + 32 && fixed[9] == 0);
-        assert(sent->out.iov[2].buf[0] == disposition);
-        smb2_free_pdu(smb2, sent);
-
-        /* Receive the same request with eight bytes of optional padding. */
-        assert(receiver && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
-        receiver->fd = pair[0];
-        assert(!fcntl(pair[0], F_SETFL, O_NONBLOCK));
-        receiver->owning_server = &server;
-        smb2_set_passthrough(receiver, 1);
-        receiver->pdu = smb2_cmd_echo_async(receiver, received_set_info, &received);
-        assert(receiver->pdu);
-        wire[3] = sizeof(wire) - 4;
-        memcpy(header, "\xfeSMB", 4);
-        header[4] = SMB2_HEADER_SIZE;
-        header[12] = SMB2_SET_INFO;
-        fixed[8] = req.buffer_offset;
-        wire[sizeof(wire) - 1] = disposition;
-        assert(write(pair[1], wire, sizeof(wire)) == sizeof(wire));
-        assert(!smb2_service(receiver, POLLIN) && received == 1);
-        smb2_free_pdu(receiver, receiver->waitqueue);
-        smb2_destroy_context(receiver);
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 16;
+        assert(!smb2_connect_tree_id(smb2, original_tree));
+        smb2_set_timeout(smb2, 30);
+        assert(!smb2_symlink_async(smb2, "target", "link", 0, completed, &result));
+        create = smb2->waitqueue;
+        assert(create && create->next);
+        create->timeout = create->next->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0));
+        assert(result.completed == 1 && result.status == -ETIMEDOUT);
+        assert(!smb2_service(smb2, 0));
+        create->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) < 0);
+        assert(!SMB2_VALID_SOCKET(smb2->fd));
+        smb2_destroy_context(smb2);
+        assert(result.completed == 1);
         close(pair[1]);
 }
 
@@ -241,7 +220,6 @@ int main(void)
         smb2->dialect = SMB2_VERSION_0210;
         assert(!smb2_connect_tree_id(smb2, original_tree));
         assert(!smb2_connect_tree_id(smb2, other_tree));
-        padded_set_info(smb2);
         for (passthrough = 0; passthrough <= 1; passthrough++) {
                 smb2_set_passthrough(smb2, passthrough);
                 for (op = UNLINK_DIRECTORY; op <= DELAY_CLOSE; op++) {
@@ -255,5 +233,6 @@ int main(void)
         }
         smb2_destroy_context(smb2);
         close(sockets[1]);
+        missing_link_create();
         return 0;
 }

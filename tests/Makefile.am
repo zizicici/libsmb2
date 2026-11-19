@@ -11,12 +11,14 @@ noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit lseek-unit
 
 noinst_PROGRAMS += sync-stat-unit
 
-noinst_PROGRAMS += set-info-unit io-limits-unit
+noinst_PROGRAMS += set-info-unit
 
-noinst_PROGRAMS += entropy-unit
-noinst_PROGRAMS += prog_sequential_io
-noinst_PROGRAMS += notify-handle-unit open-cancel-unit
-noinst_PROGRAMS += link-handle-unit iop-entropy-unit aes128ccm-test
+noinst_PROGRAMS += io-limits-unit
+noinst_PROGRAMS += link-handle-unit
+noinst_PROGRAMS += notify-handle-unit
+noinst_PROGRAMS += entropy-unit iop-entropy-unit
+noinst_PROGRAMS += open-cancel-unit prog_sequential_io
+noinst_PROGRAMS += aes128ccm-test
 
 aes128ccm_test_SOURCES = aes128ccm-test.c ../lib/aes128ccm.c ../lib/aes-armv8.c \
         ../lib/aes.c ../lib/aes_apple.c ../lib/aes_reference.c
@@ -45,8 +47,8 @@ T = "$(srcdir)"/test_*.sh
 
 test: $(noinst_PROGRAMS) $(bin_SCRIPTS)
 	./aes128ccm-test
-	./notify-handle-unit
 	./io-limits-unit
+	./notify-handle-unit
 	srcdir="$(srcdir)"; export srcdir; for TEST in $(T); do \
 		echo "Running $$TEST"; \
 		echo "--------------"; \
