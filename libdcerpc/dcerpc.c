@@ -79,17 +79,25 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <smb2/smb2.h>
 #include <smb2/libsmb2.h>
 #include <smb2/libsmb2-raw.h>
-#ifndef SMB2_HAVE_IS_DISPATCHING
-#define smb2_is_dispatching(smb2) 0
-#endif
-#ifndef SMB2_HAVE_QUEUE_PDU_CHECKED
-/* Standalone builds can use older versions of the libsmb2 transport. */
-static int smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu)
+/* These additions share the SONAME of the original Linux 7.0 transport.
+ * Fall back to its queue API when running against that library. */
+extern int smb2_is_dispatching(struct smb2_context *) __attribute__((weak));
+extern int smb2_queue_pdu_checked(struct smb2_context *, struct smb2_pdu *)
+        __attribute__((weak));
+
+static int dcerpc_transport_dispatching(struct smb2_context *smb2)
 {
+        return smb2_is_dispatching && smb2_is_dispatching(smb2);
+}
+
+static int dcerpc_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        if (smb2_queue_pdu_checked) {
+                return smb2_queue_pdu_checked(smb2, pdu);
+        }
         smb2_queue_pdu(smb2, pdu);
         return 0;
 }
-#endif
 #endif
 #include <dcerpc/dcerpc.h>
 #include <dcerpc/dcerpc-dtyp.h>
@@ -1250,7 +1258,7 @@ dcerpc_free_context(struct dcerpc_context *dce)
 
 #ifdef HAVE_LIBSMB2
         if (owns_smb2 && smb2) {
-                if (!smb2_is_dispatching(smb2)) {
+                if (!dcerpc_transport_dispatching(smb2)) {
                         smb2_disconnect_share(smb2);
                 }
                 smb2_destroy_context(smb2);
@@ -2941,7 +2949,7 @@ dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
         if (smb2_pdu == NULL) {
                 return -ENOMEM;
         }
-        return smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
+        return dcerpc_queue_pdu(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -3419,7 +3427,7 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
         if (smb2_pdu == NULL) {
                 return -ENOMEM;
         }
-        return smb2_queue_pdu_checked(dce->smb2, smb2_pdu);
+        return dcerpc_queue_pdu(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -3568,7 +3576,7 @@ dcerpc_call_sync_cb(struct dcerpc_context *dce _U_, int status,
 static int
 dcerpc_sync_in_dispatch(struct smb2_context *smb2 _U_)
 {
-        if (smb2_is_dispatching(smb2)) {
+        if (dcerpc_transport_dispatching(smb2)) {
                 errno = EDEADLK;
                 return 1;
         }
@@ -4043,7 +4051,7 @@ dcerpc_bind_async(struct dcerpc_context *dce, struct dcerpc_pending *open)
         }
         dcerpc_untrack(dce, open);
         dcerpc_track(dce, &pdu->pending, open->cb, open->cb_data);
-        if (smb2_queue_pdu_checked(dce->smb2, smb2_pdu) < 0) {
+        if (dcerpc_queue_pdu(dce->smb2, smb2_pdu) < 0) {
                 int rc = pdu->pending.orphaned ? 0 : -EIO;
                 dcerpc_untrack(dce, &pdu->pending);
                 dcerpc_free_pdu(dce, pdu);
@@ -4139,7 +4147,7 @@ dcerpc_submit_open(struct dcerpc_context *dce, dcerpc_cb cb,
                 return -ENOMEM;
         }
         dcerpc_track(dce, data, cb, cb_data);
-        if (smb2_queue_pdu_checked(dce->smb2, pdu) < 0) {
+        if (dcerpc_queue_pdu(dce->smb2, pdu) < 0) {
                 int rc = data->orphaned ? 0 : -EIO;
                 dcerpc_untrack(dce, data);
                 free(data);
