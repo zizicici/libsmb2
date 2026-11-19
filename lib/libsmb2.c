@@ -3013,7 +3013,7 @@ stat_complete(struct smb2_context *smb2, struct stat_cb_data *stat_data)
                                  nterror_to_str(stat_data->status));
         }
 
-        stat_data->cb(smb2, stat_data->status ? command_error(stat_data->status) : 0,
+        stat_data->cb(smb2, -nterror_to_errno(stat_data->status),
                       stat_data->st, stat_data->cb_data);
         free(stat_data);
 }

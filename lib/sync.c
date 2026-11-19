@@ -550,8 +550,11 @@ struct sync_stat_data {
         } result;
 };
 
-static struct sync_stat_data *new_sync_stat_data(struct smb2_context *smb2, const void *out)
+static struct sync_stat_data *new_sync_stat_data(struct smb2_context *smb2,
+                                                const void *out, size_t size)
 {
+        struct sync_stat_data *data;
+
         if (sync_in_service(smb2)) {
                 return NULL;
         }
@@ -559,7 +562,12 @@ static struct sync_stat_data *new_sync_stat_data(struct smb2_context *smb2, cons
                 errno = EINVAL;
                 return NULL;
         }
-        return alloc_sync_cb_data(smb2, sizeof(struct sync_stat_data));
+        data = alloc_sync_cb_data(smb2, sizeof(*data));
+        if (data) {
+                /* A completed query may leave some or all output fields untouched. */
+                memcpy(&data->result, out, size);
+        }
+        return data;
 }
 
 static int finish_sync_stat(struct smb2_context *smb2, struct sync_stat_data *data,
@@ -572,9 +580,7 @@ static int finish_sync_stat(struct smb2_context *smb2, struct sync_stat_data *da
                         return rc;
                 }
                 rc = data->cb.status;
-                if (rc == 0) {
-                        memcpy(out, &data->result, size);
-                }
+                memcpy(out, &data->result, size);
         }
         free(data);
         return rc;
@@ -586,7 +592,7 @@ int smb2_fstat(struct smb2_context *smb2, struct smb2fh *fh,
         struct sync_stat_data *data;
         int rc;
 
-        data = new_sync_stat_data(smb2, st);
+        data = new_sync_stat_data(smb2, st, sizeof(*st));
         if (data == NULL) {
                 return -errno;
         }
@@ -600,7 +606,7 @@ int smb2_stat(struct smb2_context *smb2, const char *path,
         struct sync_stat_data *data;
         int rc;
 
-        data = new_sync_stat_data(smb2, st);
+        data = new_sync_stat_data(smb2, st, sizeof(*st));
         if (data == NULL) {
                 return -errno;
         }
@@ -704,7 +710,7 @@ int smb2_statvfs(struct smb2_context *smb2, const char *path,
         struct sync_stat_data *data;
         int rc;
 
-        data = new_sync_stat_data(smb2, st);
+        data = new_sync_stat_data(smb2, st, sizeof(*st));
         if (data == NULL) {
                 return -errno;
         }
