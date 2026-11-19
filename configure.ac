@@ -271,9 +271,18 @@ AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
         SMB2_PC_REQUIRES="libcrypto >= 3"
         SMB2_PC_CRYPTO_LIBS=""
     ], [
+        crypto_search_dirs=""
+        expect_libdir=no
         for flag in $LDFLAGS; do
-            AS_CASE([$flag], [-L*], [SMB2_PC_CRYPTO_LIBS="$flag $SMB2_PC_CRYPTO_LIBS"])
+            AS_IF([test "$expect_libdir" = yes], [
+                crypto_search_dirs="$crypto_search_dirs -L$flag"
+                expect_libdir=no
+            ], [
+                AS_CASE([$flag], [-L], [expect_libdir=yes],
+                        [-L*], [crypto_search_dirs="$crypto_search_dirs $flag"])
+            ])
         done
+        SMB2_PC_CRYPTO_LIBS="$crypto_search_dirs $MAYBE_LIBCRYPTO"
     ])
 ])
 AC_SUBST([SMB2_PC_REQUIRES])
