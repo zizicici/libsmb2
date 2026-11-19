@@ -2568,9 +2568,19 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        if (!is_dir) {
+                create_data->unlink_tree = pdu->header.sync.tree_id;
+                create_data->unlink_path = strdup(path ? path : "");
+                if (create_data->unlink_path == NULL) {
+                        smb2_free_pdu(smb2, pdu);
+                        free(create_data);
+                        return -ENOMEM;
+                }
+        }
         create_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
+                free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
         }
@@ -2644,19 +2654,9 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
-        if (!is_dir) {
-                create_data->unlink_tree = pdu->header.sync.tree_id;
-                create_data->unlink_path = strdup(path ? path : "");
-                if (create_data->unlink_path == NULL) {
-                        smb2_free_pdu(smb2, pdu);
-                        free(create_data);
-                        return -ENOMEM;
-                }
-        }
         create_data->pending = 2;
         smb2_queue_pdu(smb2, pdu);
         if (smb2->queue_rejected) {
-                free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
         }
