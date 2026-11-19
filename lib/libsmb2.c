@@ -4786,8 +4786,7 @@ submit_notify(struct smb2_context *smb2, struct notify_change_cb_data *watch)
                 return -ENOMEM;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, watch->tree_id);
-        smb2_queue_pdu(smb2, pdu);
-        return smb2->queue_rejected ? -EIO : 0;
+        return smb2_queue_pdu_final(smb2, pdu);
 }
 
 static void
