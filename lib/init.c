@@ -500,10 +500,12 @@ smb2_random_bytes(void *buf, size_t len)
 
 /* These ports open an OS device or service for each entropy read. */
 int
-smb2_random_nonce(struct smb2_context *smb2 _U_, void *buf, size_t len)
+smb2_random_nonce(struct smb2_context *smb2 _U_, void *buf, int use_gcm)
 {
+        const uint32_t len = use_gcm ? 12 : 11;
+
 #ifdef SMB2_BATCH_NONCES
-        if (!random_provider && len <= sizeof(smb2->nonce_bytes)) {
+        if (!random_provider) {
                 if (smb2->nonce_bytes_left < len) {
                         smb2->nonce_bytes_left = 0;
                         if (smb2_random_bytes(smb2->nonce_bytes, sizeof(smb2->nonce_bytes))) {
