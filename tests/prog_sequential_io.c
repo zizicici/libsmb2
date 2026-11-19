@@ -108,6 +108,9 @@ int main(int argc, char **argv)
                 return 1;
         }
         url = smb2_parse_url(smb2, argv[1]);
+        if (url && url->domain) {
+                smb2_set_domain(smb2, url->domain);
+        }
         smb2_set_timeout(smb2, 10);
         if (url && !smb2_connect_share(smb2, url->server, url->share, url->user)) {
                 rc = check_io(smb2, url->path);
