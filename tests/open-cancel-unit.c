@@ -79,8 +79,7 @@ static void cancel_directory(struct smb2_context *smb2, enum smb2_command stage)
         assert(owner);
         if (stage == SMB2_CREATE) {
                 smb2_free_pdu(smb2, owner);
-                smb2->waitqueue->timeout = time(NULL) - 1;
-                smb2->may_have_timed_pdus = 1;
+                smb2_set_pdu_deadline(smb2, smb2->waitqueue, time(NULL) - 1);
                 assert(!smb2_service(smb2, 0));
         }
         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
@@ -157,8 +156,7 @@ static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage st
                 reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
                 smb2_free_pdu(smb2, owner);
                 if (stage == RETRY_SENT) {
-                        smb2->waitqueue->timeout = time(NULL) - 1;
-                        smb2->may_have_timed_pdus = 1;
+                        smb2_set_pdu_deadline(smb2, smb2->waitqueue, time(NULL) - 1);
                         assert(!smb2_service(smb2, 0));
                         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
                         reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);

@@ -52,7 +52,6 @@
 
 #include "portable-endian.h"
 
-#include "slist.h"
 #include "smb2.h"
 #include "libsmb2.h"
 #include "libsmb2-private.h"
@@ -635,7 +634,7 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
 static void
 smb2_add_to_outqueue(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
-        smb2_append_pdu(&smb2->outqueue, pdu);
+        smb2_append_pdu(smb2, &smb2->outqueue, pdu);
 
         /* opportunistically try to write it to the socket right away */
         if (smb2->outqueue == pdu) {
@@ -730,15 +729,12 @@ queue_pdu_inner(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pend
         if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
                 /* The shutdown sweep completes accepted requests without encoding
                  * borrowed buffers or sending another operation on the wire. */
-                smb2_append_pdu(&smb2->outqueue, pdu);
+                smb2_append_pdu(smb2, &smb2->outqueue, pdu);
                 return 0;
         }
 
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
-                if (p->timeout) {
-                        smb2->may_have_timed_pdus = 1;
-                }
                 p->report_pending = report_pending;
                 if (smb2_is_server(smb2)) {
                         /* set reply flag, servers will only reply */
@@ -1368,10 +1364,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         int unmatched = !smb2_is_server(smb2) && !receiving &&
                 SMB2_VALID_SOCKET(smb2->fd) && smb2->in.num_done;
 
-        if (!smb2->outqueue && !smb2->waitqueue) {
-                smb2->may_have_timed_pdus = 0;
-        }
-        if (!smb2->may_have_timed_pdus && !smb2->io_timers &&
+        if (!smb2->num_timed_pdus && !smb2->io_timers &&
             !(receiving && receiving->timeout) && !smb2->frame_deadline &&
             !(unmatched && smb2->timeout)) {
                 return 0;

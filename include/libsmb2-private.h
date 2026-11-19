@@ -179,7 +179,7 @@ struct smb2_context {
         const struct addrinfo *next_addrinfo;
 
         int timeout;
-        int may_have_timed_pdus;
+        size_t num_timed_pdus;
 
 #ifdef HAVE_LIBQUIC
         /* "quic" URL argument: SMB2 over QUIC (MS-SMB2 2.1) using the
@@ -865,7 +865,7 @@ int smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu);
 void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
 /* queue_prev points to the link that owns the PDU, including the queue head. */
 static inline void
-smb2_append_pdu(struct smb2_pdu **queue, struct smb2_pdu *pdu)
+smb2_append_pdu(struct smb2_context *smb2, struct smb2_pdu **queue, struct smb2_pdu *pdu)
 {
         while (*queue) {
                 queue = &(*queue)->next;
@@ -873,6 +873,9 @@ smb2_append_pdu(struct smb2_pdu **queue, struct smb2_pdu *pdu)
         pdu->queue_prev = queue;
         pdu->next = NULL;
         *queue = pdu;
+        if (pdu->timeout) {
+                smb2->num_timed_pdus++;
+        }
 }
 
 static inline void
@@ -880,6 +883,9 @@ smb2_unlink_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
         if (!pdu->queue_prev) {
                 return;
+        }
+        if (pdu->timeout) {
+                smb2->num_timed_pdus--;
         }
         if (smb2->next_timeout_pdu == pdu) {
                 smb2->next_timeout_pdu = pdu->next;
@@ -890,6 +896,19 @@ smb2_unlink_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
         pdu->queue_prev = NULL;
         pdu->next = NULL;
+}
+
+static inline void
+smb2_set_pdu_deadline(struct smb2_context *smb2, struct smb2_pdu *pdu, time_t deadline)
+{
+        if (pdu->queue_prev) {
+                if (deadline && !pdu->timeout) {
+                        smb2->num_timed_pdus++;
+                } else if (!deadline && pdu->timeout) {
+                        smb2->num_timed_pdus--;
+                }
+        }
+        pdu->timeout = deadline;
 }
 
 int smb2_timeout_pdus(struct smb2_context *smb2);

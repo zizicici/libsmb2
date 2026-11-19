@@ -110,7 +110,6 @@
 #include <ps2sdkapi.h>
 #endif
 
-#include "slist.h"
 #include "smb2.h"
 #include "libsmb2.h"
 #include "smb3-seal.h"
@@ -381,8 +380,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                     pdu->cleanup_timeout) {
                         /* A background CLOSE waited for earlier I/O or credits.
                          * Bound its wire exchange once the first byte is sent. */
-                        pdu->timeout = time(NULL) + pdu->cleanup_timeout;
-                        smb2->may_have_timed_pdus = 1;
+                        smb2_set_pdu_deadline(smb2, pdu, time(NULL) + pdu->cleanup_timeout);
                 }
                 pdu->out.num_done += (size_t)count;
 
@@ -414,7 +412,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                                                 smb2_free_pdu(smb2, pdu);
                                         } else {
                                                 /* queue requests we send to correlate replies with */
-                                                smb2_append_pdu(&smb2->waitqueue, pdu);
+                                                smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
                                         }
                                 }
                                 else {
@@ -752,7 +750,7 @@ read_more_data:
                         while (count > 0);
 
                         /* put on wait queue so queue_pdu doesn't complain */
-                        smb2_append_pdu(&smb2->waitqueue, pdu);
+                        smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
 
                         smb2->in.num_done = 0;
                         pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
@@ -1204,7 +1202,7 @@ read_more_data:
 
         if (smb2_is_server(smb2)) {
                 /* queue requests to correlate our replies we send back later */
-                smb2_append_pdu(&smb2->waitqueue, pdu);
+                smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
                 pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
                 smb2->pdu = smb2->next_pdu;
                 smb2->next_pdu = NULL;

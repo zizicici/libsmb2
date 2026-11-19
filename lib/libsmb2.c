@@ -2276,7 +2276,7 @@ smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu)
         if (pdu->header.command != SMB2_CLOSE || !pdu->cleanup_timeout) {
                 return 0;
         }
-        pdu->timeout = 0;
+        smb2_set_pdu_deadline(smb2, pdu, 0);
         pdu->cb = abandoned_close_cb;
         pdu->cb_data = NULL;
         cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL, cb_data);
