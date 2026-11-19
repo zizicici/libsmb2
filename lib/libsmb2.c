@@ -519,14 +519,19 @@ close_abandoned_file(struct smb2_context *smb2, uint32_t tree_id, smb2_file_id f
         }
         memcpy(req.file_id, file_id, SMB2_FD_SIZE);
         pdu = smb2_cmd_close_async(smb2, &req, abandoned_close_cb, NULL);
-        if (pdu) {
-                pdu->cleanup_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
-                if (smb2->pdu && smb2->pdu->cleanup_timeout) {
-                        pdu->cleanup_timeout = smb2->pdu->cleanup_timeout;
-                }
-                pdu->timeout = 0;
-                smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
-                smb2_queue_pdu_final(smb2, pdu);
+        if (!pdu) {
+                /* No caller retains this FileId to retry the close. */
+                smb2_close_context(smb2);
+                return;
+        }
+        pdu->cleanup_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
+        if (smb2->pdu && smb2->pdu->cleanup_timeout) {
+                pdu->cleanup_timeout = smb2->pdu->cleanup_timeout;
+        }
+        pdu->timeout = 0;
+        smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
+                smb2_close_context(smb2);
         }
 }
 
