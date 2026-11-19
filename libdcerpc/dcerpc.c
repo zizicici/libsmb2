@@ -3323,9 +3323,9 @@ dcerpc_fragment_request_auth(struct dcerpc_context *dce,
                         return -1;
                 }
                 o += flen;
+                pdu->frag_len = o;
                 off += chunk;
         } while (off < stub_len);
-        pdu->frag_len = o;
         pdu->frag_pos = 0;
         return 0;
 }
@@ -3469,6 +3469,9 @@ dcerpc_submit_call(struct dcerpc_context *dce,
         if (dce->sch != NULL) {
                 if (dcerpc_fragment_request_auth(dce, pdu, iov.buf, len,
                                                  max_frag)) {
+                        if (pdu->frag_len) {
+                                dcerpc_fail_pipe(dce, "Could not finish signing the RPC fragments");
+                        }
                         dcerpc_free_iovec(&iov);
                         dcerpc_free_pdu(dce, pdu);
                         return -1;
@@ -3509,6 +3512,11 @@ dcerpc_submit_call(struct dcerpc_context *dce,
                         rc = 0; /* destruction already delivered cancellation */
                 }
                 dcerpc_untrack(dce, &pdu->pending);
+                /* Signing already consumed sequence numbers, but the peer
+                 * did not receive the rejected request. */
+                if (rc && dce->sch) {
+                        dcerpc_fail_pipe(dce, "Could not submit the signed RPC request");
+                }
                 dcerpc_free_pdu(dce, pdu);
                 return rc;
         }

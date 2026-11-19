@@ -498,6 +498,8 @@ test_queue_rejection(void)
         queue_result = -EIO;
         CHECK(session_call(&s) == -EIO);
         queue_result = 0;
+        CHECK(!cb_done);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
         session_close(&s);
         CHECK(!cb_done);
 
