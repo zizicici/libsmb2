@@ -3312,12 +3312,25 @@ dcerpc_fragment_request_auth(struct dcerpc_context *dce,
 static int dcerpc_send_request_frag(struct dcerpc_context *dce,
                                     struct dcerpc_pdu *pdu);
 
+static uint16_t
+dcerpc_request_frag_length(struct dcerpc_pdu *pdu)
+{
+        const uint8_t *frag = pdu->frag_buf + pdu->frag_pos;
+
+        if (pdu->hdr.packed_drep[0] & DCERPC_DR_LITTLE_ENDIAN) {
+                return frag[8] | (frag[9] << 8);
+        }
+        return (frag[8] << 8) | frag[9];
+}
+
 static void
 dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
-                     void *command_data _U_, void *private_data)
+                     void *command_data, void *private_data)
 {
         struct dcerpc_pdu *pdu = private_data;
         struct dcerpc_context *dce = pdu->dce;
+        struct smb2_write_reply *rep = command_data;
+        uint16_t length;
         int rc;
 
         if (pdu->pending.orphaned) {
@@ -3331,6 +3344,14 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
                                             dcerpc_transport_error(status), NULL);
                 return;
         }
+        length = dcerpc_request_frag_length(pdu);
+        if (!rep || rep->count != length) {
+                dcerpc_set_error(dce, "Incomplete DCERPC fragment WRITE (%u of %u bytes)",
+                                 rep ? rep->count : 0, length);
+                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                return;
+        }
+        pdu->frag_pos += length;
         rc = dcerpc_send_request_frag(dce, pdu);
         if (rc) {
                 dcerpc_send_pdu_cb_and_free(dce, pdu, rc, NULL);
@@ -3345,13 +3366,8 @@ static int
 dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
 {
         uint8_t *frag = pdu->frag_buf + pdu->frag_pos;
-        uint16_t flen = frag[8] | (frag[9] << 8);
+        uint16_t flen = dcerpc_request_frag_length(pdu);
         struct smb2_pdu *smb2_pdu;
-
-        if (!(pdu->hdr.packed_drep[0] & DCERPC_DR_LITTLE_ENDIAN)) {
-                flen = (frag[8] << 8) | frag[9];
-        }
-        pdu->frag_pos += flen;
 
         if (frag[3] & PFC_LAST_FRAG) {
                 struct smb2_ioctl_request req;

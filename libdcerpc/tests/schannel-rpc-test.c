@@ -59,6 +59,7 @@ static void *last_priv;
 static uint8_t sent[8192];
 static size_t sent_len;
 static int dummy_pdu;
+static uint32_t write_len;
 
 #ifdef SMB2_HAVE_IS_DISPATCHING
 static int dispatching;
@@ -111,9 +112,10 @@ smb2_cmd_read_async(struct smb2_context *smb2 _U_,
 
 struct smb2_pdu *
 smb2_cmd_write_async(struct smb2_context *smb2 _U_,
-                     struct smb2_write_request *req _U_, int flags _U_,
+                     struct smb2_write_request *req, int flags _U_,
                      smb2_command_cb cb, void *cb_data)
 {
+        write_len = req->length;
         last_cb = cb;
         last_priv = cb_data;
         return (struct smb2_pdu *)&dummy_pdu;
@@ -264,6 +266,19 @@ req_coder(char *name _U_, struct dcerpc_context *dce,
 }
 
 static int
+large_req_coder(char *name, struct dcerpc_context *dce,
+                struct dcerpc_pdu *pdu, struct dcerpc_iovec *iov, void *ptr)
+{
+        unsigned i;
+        for (i = 0; i < 250; i++) {
+                if (req_coder(name, dce, pdu, iov, ptr)) {
+                        return -1;
+                }
+        }
+        return 0;
+}
+
+static int
 rep_coder(char *name _U_, struct dcerpc_context *dce,
           struct dcerpc_pdu *pdu, struct dcerpc_iovec *iov, void *ptr _U_)
 {
@@ -385,6 +400,30 @@ test_sync_wait(void)
         session_close(&s);
 }
 #endif
+
+static void
+test_fragment_write(unsigned shortfall)
+{
+        struct session s;
+        struct smb2_write_reply written = {0};
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        cb_done = 0;
+        sent_len = write_len = 0;
+        CHECK(dcerpc_call_async(s.dce, 0x15, large_req_coder, NULL, rep_coder,
+                                8, call_cb, NULL) == 0);
+        CHECK(write_len > 1 && sent_len == 0 && cb_done == 0);
+        written.count = shortfall < write_len ? write_len - shortfall : 0;
+        last_cb(s.smb2, 0, &written, last_priv);
+        if (shortfall) {
+                CHECK(cb_done == 1 && cb_status == -EIO && sent_len == 0);
+        } else {
+                CHECK(cb_done == 0 && sent_len > 0);
+                last_cb(s.smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);
+                CHECK(cb_done == 1 && cb_status < 0);
+        }
+        session_close(&s);
+}
 
 static void
 test_open_without_transport(void)
@@ -600,6 +639,9 @@ test_refused(void)
 int
 main(void)
 {
+        test_fragment_write(0);
+        test_fragment_write(1);
+        test_fragment_write(UINT32_MAX);
         test_open_without_transport();
         test_open_eof();
         test_bind();
