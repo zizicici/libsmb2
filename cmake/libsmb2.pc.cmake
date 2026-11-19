@@ -11,6 +11,6 @@ Version: @PROJECT_VERSION@
 Requires:
 Requires.private: @SMB2_PC_REQUIRES@
 Conflicts:
-Libs: -L${libdir} -lsmb2
+Libs: -L"${libdir}" -lsmb2
 Libs.private: @SMB2_PC_PRIVATE_LIBS@
-Cflags: -I${includedir}
+Cflags: -I"${includedir}"
