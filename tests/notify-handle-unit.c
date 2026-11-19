@@ -71,15 +71,30 @@ static void watch_across_tree_switch(struct smb2_context *smb2)
         assert(calls == 3 && !smb2->waitqueue && !smb2->outqueue);
 }
 
+static void start_path_watch(struct smb2_context *smb2, int status, void *changes, void *data)
+{
+        assert(status == 0);
+        free_smb2_file_notify_change_information(smb2, changes);
+        assert(!smb2_select_tree_id(smb2, 1));
+        assert(!smb2_notify_change_async(smb2, "dir", 0,
+                        SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 0, notify_done, data));
+}
+
 static void watch_path(struct smb2_context *smb2)
 {
         struct smb2_create_reply created = {0};
         struct smb2_change_notify_reply rep = {0};
         int calls = 0;
 
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+
         assert(!smb2_select_tree_id(smb2, 1));
-        assert(!smb2_notify_change_async(smb2, "dir", 0,
-                        SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 0, notify_done, &calls));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        assert(!smb2_notify_change_filehandle_async(smb2, fh, 0,
+                        SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 0, start_path_watch, &calls));
+        reply(smb2, SMB2_CHANGE_NOTIFY, 0, &rep);
         reply(smb2, SMB2_CREATE, 0, &created);
         reply(smb2, SMB2_CHANGE_NOTIFY, 0, &rep);
         reply(smb2, SMB2_CLOSE, 0, NULL);
