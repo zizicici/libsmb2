@@ -50,6 +50,15 @@ if [ -r /sys/devices/system/cpu/kernel_max ] && command -v timeout >/dev/null 2>
     success
 fi
 
+echo -n "Trim a longer destination, including for an empty source ... "
+printf short > testfile
+for input in testfile /dev/null; do
+    ../utils/smb2-cp "$input" "${TESTURL}/testfile" >/dev/null || failure
+    ../utils/smb2-cp "${TESTURL}/testfile" testfile2 >/dev/null || failure
+    cmp "$input" testfile2 || failure
+done
+success
+
 echo -n "Testing cp from a file that does not exist ... "
 ../utils/smb2-cp "${TESTURL}/testfile-not-exist"  testfile2 2>/dev/null && failure
 success

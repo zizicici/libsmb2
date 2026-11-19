@@ -97,15 +97,18 @@ file_error(struct file_context *fc)
 /* SMB file indices alone do not identify a file across volumes. For
  * unrecognized aliases the copy loop preserves the source through EOF. */
 static int
-same_file(struct file_context *src, struct file_context *dst, int *dst_regular)
+same_file(struct file_context *src, struct file_context *dst, uint64_t *dst_size)
 {
 	struct stat src_st, dst_st;
 
-	*dst_regular = 1;
 	if (dst->is_smb2) {
 		const char *src_domain, *dst_domain;
 		const char *src_user, *dst_user;
 
+		/* SEEK_END uses the size already returned by CREATE. */
+		if (smb2_lseek(dst->smb2, dst->smb2fh, 0, SEEK_END, dst_size) < 0) {
+			return -1;
+		}
 		if (!src->is_smb2) {
 			return 0;
 		}
@@ -122,7 +125,7 @@ same_file(struct file_context *src, struct file_context *dst, int *dst_regular)
 	if (fstat(dst->fd, &dst_st) < 0) {
 		return -1;
 	}
-	*dst_regular = S_ISREG(dst_st.st_mode);
+	*dst_size = S_ISREG(dst_st.st_mode) && dst_st.st_size > 0 ? (uint64_t)dst_st.st_size : 0;
 	if (src->is_smb2) {
 		return 0;
 	}
@@ -203,7 +206,8 @@ static uint8_t buf[BUFSIZE];
 
 int main(int argc, char *argv[])
 {
-	int dst_regular, same;
+	uint64_t dst_size;
+	int same;
 	struct file_context *src;
 	struct file_context *dst;
 	uint64_t off = 0;
@@ -238,9 +242,9 @@ int main(int argc, char *argv[])
 		return 10;
 	}
 
-	same = same_file(src, dst, &dst_regular);
+	same = same_file(src, dst, &dst_size);
 	if (same < 0) {
-		fprintf(stderr, "Failed to stat local file: %s\n", strerror(errno));
+		fprintf(stderr, "Failed to inspect file: %s\n", file_error(dst));
 		goto out;
 	}
 	if (same) {
@@ -282,7 +286,7 @@ int main(int argc, char *argv[])
 	}
 	/* Trim the old tail only after reading the source to EOF. Even a
 	 * local path and a share URL can refer to the same underlying file. */
-	if (dst_regular &&
+	if (off < dst_size &&
 	    (dst->is_smb2 ? smb2_ftruncate(dst->smb2, dst->smb2fh, off)
 	                  : ftruncate(dst->fd, (off_t)off)) < 0) {
 		fprintf(stderr, "Failed to truncate destination: %s\n", file_error(dst));
