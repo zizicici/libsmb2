@@ -330,6 +330,42 @@ static void timeout_during_sync_wait(struct smb2_context *smb2)
         smb2_set_timeout(smb2, 0);
 }
 
+static void expect_timeout(struct smb2_context *smb2, int status, void *args, void *data)
+{
+        int *count = data;
+        assert(status == -ETIMEDOUT);
+        (*count)++;
+}
+
+static void deferred_io_timeout(struct smb2_context *smb2, int positioned)
+{
+        struct callbacks calls = {0};
+        struct smb2_read_reply read = {0};
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        uint8_t byte;
+        int expired = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        if (positioned) {
+                assert(!smb2_pread_async(smb2, fh, &byte, 1, 0, completed, &calls));
+        } else {
+                assert(!smb2_read_async(smb2, fh, &byte, 1, completed, &calls));
+        }
+        /* Make the next request's deadline deterministic without sleeping. */
+        smb2_set_timeout(smb2, -1);
+        assert(!smb2_close_async(smb2, fh, expect_timeout, &expired));
+        smb2_set_timeout(smb2, 0);
+        assert(!smb2_service(smb2, 0));
+        assert(expired == 1 && !calls.completed);
+        assert(!smb2_close_async(smb2, fh, completed, &calls));
+        reply(smb2, SMB2_READ, 0, &read);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(calls.completed == 2);
+}
+
 static void flush_after_tree_switch(struct smb2_context *smb2)
 {
         struct callbacks calls = {0};
@@ -578,6 +614,8 @@ int main(void)
         reject_first_io(smb2, 0);
         reject_first_io(smb2, 1);
         nonread_eof(smb2);
+        deferred_io_timeout(smb2, 0);
+        deferred_io_timeout(smb2, 1);
         flush_after_tree_switch(smb2);
         timeout_during_sync_wait(smb2);
         disconnect_during_copy(smb2, pair[1]);

@@ -1398,6 +1398,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         pdu = pdu->next;
                 }
         }
+        smb2_timeout_file_io(smb2, t);
         smb2->servicing = servicing;
         smb2_finish_dispatch(smb2);
         return 0;

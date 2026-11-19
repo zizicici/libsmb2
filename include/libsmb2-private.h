@@ -296,6 +296,7 @@ struct smb2_context {
          * smb2_destroy_context().
          */
         struct smb2fh *fhs;
+        struct file_io *io_timers, *last_io_timer;
         struct smb2dir *dirs;
 
         /*
@@ -848,6 +849,7 @@ int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
 int smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_finish_dispatch(struct smb2_context *smb2);
+void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
 int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */

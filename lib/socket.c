@@ -1576,7 +1576,7 @@ service_fd(struct smb2_context *smb2, t_socket fd, int revents)
         }
 
   out:
-        if (smb2->lifetime == SMB2_CONTEXT_LIVE && smb2->timeout && smb2_timeout_pdus(smb2) < 0) {
+        if (smb2->lifetime == SMB2_CONTEXT_LIVE && (smb2->timeout || smb2->io_timers) && smb2_timeout_pdus(smb2) < 0) {
                 return -ETIMEDOUT;
         }
         return ret;

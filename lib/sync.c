@@ -111,7 +111,7 @@ static int wait_for_reply(struct smb2_context *smb2,
 			 * timeouts are still checked below. */
 			pfd.revents = 0;
 		}
-                if (smb2->timeout) {
+                if (smb2->timeout || smb2->io_timers) {
                         int rc = smb2_timeout_pdus(smb2);
                         if (cb_data->is_finished) {
                                 break;

@@ -2126,6 +2126,8 @@ smb2_open_async(struct smb2_context *smb2, const char *path, int flags,
  * them must also wait for writes which have not reached the server yet. */
 struct file_io {
         struct file_io *next;
+        struct file_io *timer_prev, *timer_next;
+        time_t deadline;
         struct smb2fh *fh;
         enum smb2_command command;
         uint64_t offset, seek_generation;
@@ -2144,9 +2146,82 @@ struct file_io {
 static int submit_file_io(struct smb2_context *, struct file_io *);
 static void file_io_done(struct smb2_context *, struct file_io *, int, void *);
 
+/* Only deferred operations need a local timer. Once submitted, the PDU
+ * carries the same absolute deadline. Keep equal-deadline callbacks in FIFO order. */
+static void
+start_io_timer(struct smb2_context *smb2, struct file_io *io)
+{
+        if (!io->deadline) {
+                return;
+        }
+        io->timer_prev = smb2->last_io_timer;
+        if (io->timer_prev) {
+                io->timer_prev->timer_next = io;
+        } else {
+                smb2->io_timers = io;
+        }
+        smb2->last_io_timer = io;
+}
+
+static void
+remove_io_timer(struct smb2_context *smb2, struct file_io *io)
+{
+        if (io->timer_prev) {
+                io->timer_prev->timer_next = io->timer_next;
+        } else {
+                smb2->io_timers = io->timer_next;
+        }
+        if (io->timer_next) {
+                io->timer_next->timer_prev = io->timer_prev;
+        } else {
+                smb2->last_io_timer = io->timer_prev;
+        }
+        io->timer_prev = io->timer_next = NULL;
+}
+
+void
+smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
+{
+        struct file_io *io = smb2->io_timers;
+
+        while (io) {
+                struct smb2fh *fh = io->fh;
+                struct file_io *prev;
+                void *args = NULL;
+
+                if (io->deadline >= now) {
+                        io = io->timer_next;
+                        continue;
+                }
+                remove_io_timer(smb2, io);
+                if (io == fh->waiting_close) {
+                        fh->waiting_close = NULL;
+                        fh->io_head = fh->io_tail = NULL;
+                } else {
+                        for (prev = fh->io_head; prev->next != io; prev = prev->next) {
+                        }
+                        prev->next = io->next;
+                        if (fh->io_tail == io) {
+                                fh->io_tail = prev;
+                        }
+                }
+                if (io->command == SMB2_CLOSE) {
+                        fh->closing = 0;
+                } else if (io->command == SMB2_READ) {
+                        args = &io->args.read;
+                } else if (io->command == SMB2_WRITE) {
+                        args = &io->args.write;
+                }
+                io->cb(smb2, -ETIMEDOUT, args, io->cb_data);
+                free(io);
+                io = smb2->io_timers; /* callbacks can change either queue */
+        }
+}
+
 static int
 queue_io_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, struct file_io *io)
 {
+        pdu->timeout = io->deadline;
         smb2_set_tree_id_for_pdu(smb2, pdu, io->tree_id);
         return smb2_queue_pdu_final(smb2, pdu);
 }
@@ -2327,6 +2402,12 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
 {
         struct smb2fh *fh = io->fh;
 
+        if (io->timer_prev || smb2->io_timers == io) {
+                remove_io_timer(smb2, io);
+                if (io->deadline < time(NULL)) {
+                        return -ETIMEDOUT;
+                }
+        }
         /* A shutdown completes the accepted queue locally. Its callers may
          * already have returned from a failed synchronous transport wait. */
         if (smb2->lifetime != SMB2_CONTEXT_LIVE || smb2->in_queue_abort) {
@@ -2343,6 +2424,7 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         case SMB2_CLOSE:
                 if (fh->pending_positioned) {
                         fh->waiting_close = io;
+                        start_io_timer(smb2, io);
                         return 0;
                 }
                 return submit_close(smb2, io);
@@ -2435,16 +2517,19 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
         io->fh = fh;
         io->command = command;
         io->positioned = position != NULL;
+        io->deadline = smb2->timeout ? time(NULL) + smb2->timeout : 0;
         io->offset = position ? *position : (uint64_t)fh->offset;
         io->seek_generation = fh->seek_generation;
         io->tree_id = file_handle_tree_id(smb2, fh);
         io->cb = cb;
         io->cb_data = cb_data;
         if (command == SMB2_WRITE) {
+                io->args.write.offset = io->offset;
                 io->args.write.fh = fh;
                 io->args.write.buf = buf;
                 io->args.write.count = count;
         } else if (command == SMB2_READ) {
+                io->args.read.offset = io->offset;
                 io->args.read.fh = fh;
                 io->args.read.buf = buf;
                 io->args.read.count = count;
@@ -2454,6 +2539,7 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
                 fh->closing = 1;
         }
         if (!position && fh->io_tail) {
+                start_io_timer(smb2, io);
                 fh->io_tail->next = io;
                 fh->io_tail = io;
                 return 0;
@@ -6520,7 +6606,7 @@ int smb2_serve_port(struct smb2_server *server, const int max_connections, smb2_
                                         smb2_set_error(smb2, "Timeout expired and no connection exists");
                                         smb2_close_context(smb2);
                                 }
-                                if (smb2->timeout) {
+                                if (smb2->timeout || smb2->io_timers) {
                                         smb2_timeout_pdus(smb2);
                                 }
                         }
