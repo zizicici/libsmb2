@@ -1590,7 +1590,7 @@ service_fd(struct smb2_context *smb2, t_socket fd, int revents)
 int
 smb2_is_dispatching(struct smb2_context *smb2)
 {
-        return smb2 && (smb2->servicing || smb2->in_queue_abort);
+        return smb2 && smb2->servicing;
 }
 
 int
