@@ -222,7 +222,8 @@ struct smb2_context {
         const char *domain;
         const char *workstation;
         char client_challenge[8];
-#ifdef __amigaos4__
+#if defined(__amigaos4__) || defined(__SWITCH__) || defined(__3DS__)
+#define SMB2_BATCH_NONCES 1
         uint8_t nonce_bytes[12 * 16];
         size_t nonce_bytes_left;
 #endif

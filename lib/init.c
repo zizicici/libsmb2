@@ -493,16 +493,15 @@ smb2_random_bytes(void *buf, size_t len)
 #endif
 }
 
-/* AmigaOS opens timer.device for each entropy read. Batch nonce draws
- * per connection without retaining a task-owned device request. */
+/* These ports open an OS device or service for each entropy read. */
 int
 smb2_random_nonce(struct smb2_context *smb2 _U_, void *buf, size_t len)
 {
-#ifdef __amigaos4__
+#ifdef SMB2_BATCH_NONCES
         if (!random_provider && len <= sizeof(smb2->nonce_bytes)) {
                 if (smb2->nonce_bytes_left < len) {
                         smb2->nonce_bytes_left = 0;
-                        if (smb2_amiga_random_bytes(smb2->nonce_bytes, sizeof(smb2->nonce_bytes))) {
+                        if (smb2_random_bytes(smb2->nonce_bytes, sizeof(smb2->nonce_bytes))) {
                                 return -1;
                         }
                         smb2->nonce_bytes_left = sizeof(smb2->nonce_bytes);
