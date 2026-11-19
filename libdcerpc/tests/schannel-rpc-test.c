@@ -380,6 +380,15 @@ session_call(struct session *s)
 /* ---------------------------------------------------- the tests */
 
 #ifdef SMB2_HAVE_IS_DISPATCHING
+static int
+nested_call_coder(char *name, struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
+                  struct dcerpc_iovec *iov, void *ptr)
+{
+        CHECK(dcerpc_call(dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
+        sent_len = 0; /* Only the inner call reached the transport. */
+        return req_coder(name, dce, pdu, iov, ptr);
+}
+
 static void
 test_sync_wait(void)
 {
@@ -393,8 +402,9 @@ test_sync_wait(void)
         CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
         CHECK(errno == EDEADLK && last_cb == NULL);
         dispatching = 0;
-        CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
-        CHECK(last_cb != NULL);
+        CHECK(dcerpc_call_async(s.dce, 0x15, nested_call_coder, NULL, rep_coder,
+                                8, call_cb, NULL) == -EIO);
+        CHECK(sent_len == 0 && last_cb != NULL);
         CHECK(strstr(dcerpc_get_error(s.dce), "partial SMB frame") != NULL);
         CHECK(session_call(&s) == -EIO && sent_len == 0);
         CHECK(dcerpc_connect_context_async(s.dce, "netlogon", &netlogon_syntax,

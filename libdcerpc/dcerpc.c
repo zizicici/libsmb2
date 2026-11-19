@@ -3465,6 +3465,13 @@ dcerpc_submit_call(struct dcerpc_context *dce,
         if (pdu == NULL) {
                 return -1;
         }
+        /* An application coder can destroy the context or retire the pipe. */
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                dcerpc_free_iovec(&iov);
+                dcerpc_free_pdu(dce, pdu);
+                return rc;
+        }
         len = iov.offset;
 
         pdu->coder = rep_coder;
@@ -3510,10 +3517,6 @@ dcerpc_submit_call(struct dcerpc_context *dce,
          * the callback, which untracks and frees the pdu before
          * dcerpc_send_request_frag() returns. Tracking afterwards would
          * write the freed pdu back onto dce->pending. */
-        if (dce->destroying) {
-                dcerpc_free_pdu(dce, pdu);
-                return -ECANCELED;
-        }
         dcerpc_track(dce, &pdu->pending, cb, cb_data);
         rc = dcerpc_send_request_frag(dce, pdu);
         if (rc) {
