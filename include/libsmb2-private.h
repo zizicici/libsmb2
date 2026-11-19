@@ -284,6 +284,7 @@ struct smb2_context {
          */
         struct smb2_pdu *outqueue;
         struct smb2_pdu *waitqueue;
+        struct smb2_pdu *next_timeout_pdu;
 
         /* Set while the encryption-abort path in smb2_queue_pdu() fires
          * the aborted chain's callbacks. A callback that queues another
@@ -391,7 +392,7 @@ smb2_recv_pdu_cap(const struct smb2_context *smb2)
 }
 
 struct smb2_pdu {
-        struct smb2_pdu *next;
+        struct smb2_pdu *next, **queue_prev;
         struct smb2_header header;
 
         struct smb2_pdu *next_compound;
@@ -862,6 +863,35 @@ int smb2_expire_sent_create(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu);
 void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
+/* queue_prev points to the link that owns the PDU, including the queue head. */
+static inline void
+smb2_append_pdu(struct smb2_pdu **queue, struct smb2_pdu *pdu)
+{
+        while (*queue) {
+                queue = &(*queue)->next;
+        }
+        pdu->queue_prev = queue;
+        pdu->next = NULL;
+        *queue = pdu;
+}
+
+static inline void
+smb2_unlink_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        if (!pdu->queue_prev) {
+                return;
+        }
+        if (smb2->next_timeout_pdu == pdu) {
+                smb2->next_timeout_pdu = pdu->next;
+        }
+        *pdu->queue_prev = pdu->next;
+        if (pdu->next) {
+                pdu->next->queue_prev = pdu->queue_prev;
+        }
+        pdu->queue_prev = NULL;
+        pdu->next = NULL;
+}
+
 int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */

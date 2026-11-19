@@ -56,8 +56,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command,
         assert(pdu->header.sync.tree_id == 1);
         assert(smb2_select_tree_id(smb2, 2) == 0);
         smb2->credits++; /* grant one credit with each mock reply */
-        smb2->waitqueue = pdu->next;
-        pdu->next = NULL;
+        smb2_unlink_pdu(smb2, pdu);
         smb2->pdu = pdu;
         if (pdu->cb) {
                 pdu->cb(smb2, status, data, pdu->cb_data);

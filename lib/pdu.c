@@ -406,8 +406,7 @@ smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                 }
                 return;
         }
-        SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
-        SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+        smb2_unlink_pdu(smb2, pdu);
 
         if (pdu->next_compound) {
                 smb2_free_pdu(smb2, pdu->next_compound);
@@ -636,7 +635,7 @@ smb2_decode_header(struct smb2_context *smb2, struct smb2_iovec *iov,
 static void
 smb2_add_to_outqueue(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
-        SMB2_LIST_ADD_END(&smb2->outqueue, pdu);
+        smb2_append_pdu(&smb2->outqueue, pdu);
 
         /* opportunistically try to write it to the socket right away */
         if (smb2->outqueue == pdu) {
@@ -715,7 +714,7 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
                                pdu->header.async.async_id = req_pdu->header.async.async_id;
                        }
-                       SMB2_LIST_REMOVE(&smb2->waitqueue, req_pdu);
+                       smb2_unlink_pdu(smb2, req_pdu);
                        smb2_free_pdu(smb2, req_pdu);
                 }
         }
@@ -731,7 +730,7 @@ queue_pdu_inner(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pend
         if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
                 /* The shutdown sweep completes accepted requests without encoding
                  * borrowed buffers or sending another operation on the wire. */
-                SMB2_LIST_ADD_END(&smb2->outqueue, pdu);
+                smb2_append_pdu(&smb2->outqueue, pdu);
                 return 0;
         }
 
@@ -1391,8 +1390,8 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                 goto retire_connection;
         }
 
-        pdu = smb2->outqueue;
-        while (pdu) {
+        for (pdu = smb2->outqueue; pdu; pdu = smb2->next_timeout_pdu) {
+                smb2->next_timeout_pdu = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         struct smb2_pdu *p;
 
@@ -1402,10 +1401,9 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                                 goto retire_connection;
                         }
                         if (smb2_expire_unsent_close(smb2, pdu)) {
-                                pdu = smb2->outqueue;
                                 continue;
                         }
-                        SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
+                        smb2_unlink_pdu(smb2, pdu);
                         /*
                          * An unsent compound is still chained: like
                          * smb2_destroy_context(), fire every member's
@@ -1423,10 +1421,6 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
-                        /* Completion callbacks may remove other queued PDUs. */
-                        pdu = smb2->outqueue;
-                } else {
-                        pdu = pdu->next;
                 }
         }
 
@@ -1435,8 +1429,8 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
          * clears next_compound as it moves each chain member onto the
          * waitqueue.
          */
-        pdu = smb2->waitqueue;
-        while (pdu) {
+        for (pdu = smb2->waitqueue; pdu; pdu = smb2->next_timeout_pdu) {
+                smb2->next_timeout_pdu = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         if (pdu->waiting_for_late_create) {
                                 smb2_set_error(smb2, "Timed out waiting for the FileId of a detached CREATE");
@@ -1445,10 +1439,9 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         if (smb2_waiting_for_create_cleanup(pdu) || smb2_expire_sent_create(smb2, pdu)) {
                                 pdu->waiting_for_late_create = 1;
                                 pdu->timeout = t + pdu->cleanup_timeout;
-                                pdu = smb2->waitqueue;
                                 continue;
                         }
-                        SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+                        smb2_unlink_pdu(smb2, pdu);
                         if (pdu->cb) {
                                 pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
                                         pdu->cb_data);
@@ -1456,10 +1449,6 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
-                        /* Completion callbacks may remove other queued PDUs. */
-                        pdu = smb2->waitqueue;
-                } else {
-                        pdu = pdu->next;
                 }
         }
         if (smb2->frame_deadline && smb2->frame_deadline < t) {
@@ -1472,6 +1461,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         return 0;
 
 retire_connection:
+        smb2->next_timeout_pdu = NULL;
         /* Teardown completes outstanding requests and releases remote handles. */
         smb2_close_context(smb2);
         smb2->servicing = servicing;

@@ -594,7 +594,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
                         uint32_t status = pdu->timed_out ? SMB2_STATUS_IO_TIMEOUT
                                                         : SMB2_STATUS_SHUTDOWN;
 
-                        smb2->outqueue = pdu->next;
+                        smb2_unlink_pdu(smb2, pdu);
                         /*
                          * An unsent compound is still chained: every PDU
                          * in it has its own callback, and smb2_free_pdu()
@@ -631,7 +631,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
                 while (smb2->waitqueue) {
                         struct smb2_pdu *pdu = smb2->waitqueue;
 
-                        smb2->waitqueue = pdu->next;
+                        smb2_unlink_pdu(smb2, pdu);
                         if (pdu->cb) {
                                 pdu->cb(smb2, SMB2_STATUS_SHUTDOWN, NULL,
                                         pdu->cb_data);

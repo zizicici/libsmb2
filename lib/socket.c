@@ -387,7 +387,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 pdu->out.num_done += (size_t)count;
 
                 if (pdu->out.num_done == SMB2_SPL_SIZE + spl) {
-                        SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
+                        smb2_unlink_pdu(smb2, pdu);
                         smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
                         while (pdu) {
                                 tmp_pdu = pdu->next_compound;
@@ -414,7 +414,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                                                 smb2_free_pdu(smb2, pdu);
                                         } else {
                                                 /* queue requests we send to correlate replies with */
-                                                SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                                                smb2_append_pdu(&smb2->waitqueue, pdu);
                                         }
                                 }
                                 else {
@@ -752,7 +752,7 @@ read_more_data:
                         while (count > 0);
 
                         /* put on wait queue so queue_pdu doesn't complain */
-                        SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                        smb2_append_pdu(&smb2->waitqueue, pdu);
 
                         smb2->in.num_done = 0;
                         pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
@@ -932,7 +932,7 @@ read_more_data:
                                         return -1;
                                 }
 
-                                SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+                                smb2_unlink_pdu(smb2, pdu);
                                 if (pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
                                         /* Allow a full interval for the body of a late CREATE reply. */
                                         pdu->timeout = time(NULL) + pdu->cleanup_timeout;
@@ -1204,7 +1204,7 @@ read_more_data:
 
         if (smb2_is_server(smb2)) {
                 /* queue requests to correlate our replies we send back later */
-                SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                smb2_append_pdu(&smb2->waitqueue, pdu);
                 pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
                 smb2->pdu = smb2->next_pdu;
                 smb2->next_pdu = NULL;

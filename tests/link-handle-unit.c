@@ -67,8 +67,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
                 assert(!pdu->report_pending);
                 assert(!result->completed || result->status == -ETIMEDOUT);
         }
-        smb2->waitqueue = pdu->next;
-        pdu->next = NULL;
+        smb2_unlink_pdu(smb2, pdu);
         pdu->cb(smb2, status, data, pdu->cb_data);
         smb2_free_pdu(smb2, pdu);
 }
