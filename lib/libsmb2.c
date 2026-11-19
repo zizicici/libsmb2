@@ -2147,7 +2147,7 @@ struct file_io {
                 struct smb2_read_cb_data read;
                 struct smb2_write_cb_data write;
                 uint64_t truncate_length;
-                int close_timeout;
+                struct smb2_pdu *close_pdu;
         } args;
 };
 
@@ -2284,7 +2284,7 @@ smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu)
 }
 
 static int
-submit_close(struct smb2_context *smb2, struct file_io *io)
+prepare_close(struct smb2_context *smb2, struct file_io *io)
 {
         struct smb2_close_request req = {0};
         struct smb2_pdu *pdu;
@@ -2296,8 +2296,9 @@ submit_close(struct smb2_context *smb2, struct file_io *io)
                 smb2_set_error(smb2, "Failed to create close command");
                 return -ENOMEM;
         }
-        pdu->cleanup_timeout = io->args.close_timeout;
-        return queue_io_pdu(smb2, pdu, io) < 0 ? -EIO : 0;
+        pdu->cleanup_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
+        io->args.close_pdu = pdu;
+        return 0;
 }
 
 static void
@@ -2472,8 +2473,11 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
                 return submit_ftruncate(smb2, io);
         case SMB2_FLUSH:
                 return submit_fsync(smb2, io);
-        case SMB2_CLOSE:
-                return submit_close(smb2, io);
+        case SMB2_CLOSE: {
+                struct smb2_pdu *pdu = io->args.close_pdu;
+                io->args.close_pdu = NULL;
+                return queue_io_pdu(smb2, pdu, io) < 0 ? -EIO : 0;
+        }
         default:
                 return -EINVAL;
         }
@@ -2505,8 +2509,13 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                 if (io->cb) {
                         io->cb(smb2, status, reply, io->cb_data);
                 }
-                if (io->command == SMB2_CLOSE && fh->closing) {
-                        free_smb2fh(smb2, fh);
+                if (io->command == SMB2_CLOSE) {
+                        if (io->args.close_pdu) {
+                                smb2_free_pdu(smb2, io->args.close_pdu);
+                        }
+                        if (fh->closing) {
+                                free_smb2fh(smb2, fh);
+                        }
                 }
                 free(io);
                 /* With no successor, the callback may have closed the handle. */
@@ -2564,6 +2573,9 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
         io->tree_id = file_handle_tree_id(smb2, fh);
         io->cb = cb;
         io->cb_data = cb_data;
+        /* Diagnostic callbacks may submit work or destroy the context. */
+        servicing = smb2->servicing;
+        smb2->servicing = 1;
         if (command == SMB2_WRITE) {
                 io->args.write.offset = io->offset;
                 io->args.write.fh = fh;
@@ -2577,21 +2589,23 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
         } else if (command == SMB2_SET_INFO) {
                 io->args.truncate_length = *(const uint64_t *)buf;
         } else if (command == SMB2_CLOSE) {
-                io->args.close_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
                 fh->closing = 1;
+                rc = prepare_close(smb2, io);
+                if (rc < 0) {
+                        fh->closing = 0;
+                        free(io);
+                        goto out;
+                }
         }
         if (!position && fh->io_tail) {
                 start_io_timer(smb2, io);
                 io->prev = fh->io_tail;
                 fh->io_tail->next = io;
                 fh->io_tail = io;
-                return 0;
+                rc = 0;
+                goto out;
         }
 
-        /* Diagnostics can enqueue another operation or release the context
-         * while the initial submission is still on the stack. */
-        servicing = smb2->servicing;
-        smb2->servicing = 1;
         if (position) {
                 fh->pending_positioned++;
         } else {
@@ -2611,6 +2625,7 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
                         file_io_done(smb2, io, rc, NULL);
                 }
         }
+out:
         smb2->servicing = servicing;
         smb2_finish_dispatch(smb2);
         return rc;
