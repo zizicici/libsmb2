@@ -322,7 +322,7 @@ SMB2_AESNI static void smb2_aesni_cmac_iov(const uint8_t key[16], const struct s
 }
 #endif
 
-#if SMB2_ARMV8_AES && !defined(HAVE_OPENSSL)
+#if SMB2_ARMV8_AES
 #define SMB2_ARMV8 __attribute__((target("+crypto")))
 
 #include <arm_neon.h>
@@ -382,7 +382,7 @@ SMB2_ARMV8 static void smb2_armv8_cmac_iov(const uint8_t key[16], const struct s
         x = smb2_armv8_aes128_encrypt(veorq_u8(x, vld1q_u8(last)), &rk);
         vst1q_u8(mac, x);
 }
-#endif /* SMB2_ARMV8_AES && !HAVE_OPENSSL */
+#endif /* SMB2_ARMV8_AES */
 
 void smb3_aes_cmac_128(uint8_t key[AES128_KEY_LEN],
                    uint8_t * msg,
