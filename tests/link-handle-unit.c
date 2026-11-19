@@ -64,8 +64,9 @@ static void reply(struct smb2_context *smb2, enum smb2_command command, uint32_t
                 assert(pdu->out.iov[2].buf[0] == 1);
         }
         if (smb2->passthrough) {
+                int before = result->completed;
                 pdu->cb(smb2, SMB2_STATUS_PENDING, NULL, pdu->cb_data);
-                assert(result->completed == 0 && smb2->waitqueue == pdu);
+                assert(result->completed == before && smb2->waitqueue == pdu);
         }
         smb2->waitqueue = pdu->next;
         pdu->next = NULL;
@@ -154,6 +155,7 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         struct smb2_pdu *create;
 
         smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
         assert(!smb2_select_tree_id(smb2, original_tree));
         if (unlink_op) {
                 assert(!smb2_unlink_async(smb2, "link", completed, &result));
@@ -164,6 +166,7 @@ static void late_create(struct smb2_context *smb2, int unlink_op)
         }
         create = smb2->waitqueue;
         assert(create && create->next);
+        smb2_set_timeout(smb2, 0);
         create->timeout = create->next->timeout = time(NULL) - 1;
         assert(!smb2_service(smb2, 0) && result.completed == 1 && result.status == -ETIMEDOUT);
         assert(!smb2_service(smb2, 0));

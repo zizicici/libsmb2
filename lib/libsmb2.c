@@ -6515,7 +6515,7 @@ int smb2_serve_port(struct smb2_server *server, const int max_connections, smb2_
                                         smb2_set_error(smb2, "Timeout expired and no connection exists");
                                         smb2_close_context(smb2);
                                 }
-                                if (smb2->timeout) {
+                                if (smb2->timeout || smb2->num_timed_links) {
                                         smb2_timeout_pdus(smb2);
                                 }
                         }

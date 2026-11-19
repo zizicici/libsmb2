@@ -122,8 +122,8 @@ static int wait_for_reply(struct smb2_context *smb2,
 			 * timeouts are still checked below. */
 			pfd.revents = 0;
 		}
-                if (smb2->timeout) {
-                        smb2_timeout_pdus(smb2);
+                if ((smb2->timeout || smb2->num_timed_links) && smb2_timeout_pdus(smb2) < 0) {
+                        return -1;
                 }
 		if (!SMB2_VALID_SOCKET(smb2->fd) && ((time(NULL) - t) > (smb2->timeout)))
 		{
