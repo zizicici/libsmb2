@@ -17,6 +17,7 @@ noinst_PROGRAMS += io-limits-unit
 noinst_PROGRAMS += link-handle-unit
 noinst_PROGRAMS += notify-handle-unit
 noinst_PROGRAMS += entropy-unit iop-entropy-unit
+noinst_PROGRAMS += open-cancel-unit prog_sequential_io
 noinst_PROGRAMS += aes128ccm-test
 
 aes128ccm_test_SOURCES = aes128ccm-test.c ../lib/aes128ccm.c ../lib/aes-armv8.c \
