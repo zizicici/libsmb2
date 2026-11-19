@@ -265,8 +265,10 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ])
 SMB2_PC_REQUIRES=""
 SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
-AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
+AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC"], [
     AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
+])
+AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
     AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
         SMB2_PC_REQUIRES="libcrypto >= 3"
         SMB2_PC_CRYPTO_LIBS=""
@@ -285,6 +287,12 @@ AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
         SMB2_PC_CRYPTO_LIBS="$crypto_search_dirs $MAYBE_LIBCRYPTO"
     ])
 ])
+SMB2_PC_QUIC_LIBS="$MAYBE_LIBQUIC"
+AS_IF([test -n "$MAYBE_LIBQUIC" && test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists gnutls], [
+    SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }gnutls"
+    SMB2_PC_QUIC_LIBS="-lquic"
+])
+AC_SUBST([SMB2_PC_QUIC_LIBS])
 AC_SUBST([SMB2_PC_REQUIRES])
 AC_SUBST([SMB2_PC_CRYPTO_LIBS])
 AC_SUBST([MAYBE_LIBCRYPTO])
