@@ -54,6 +54,7 @@ static void reply(struct smb2_context *smb2, enum smb2_command command,
         assert(pdu && pdu->header.command == command);
         assert(pdu->header.sync.tree_id == 1);
         assert(smb2_select_tree_id(smb2, 2) == 0);
+        smb2->credits++; /* grant one credit with each mock reply */
         smb2->waitqueue = pdu->next;
         pdu->next = NULL;
         smb2->pdu = pdu;
@@ -346,6 +347,46 @@ static void flush_after_tree_switch(struct smb2_context *smb2)
         assert(calls.completed == 2);
 }
 
+struct reentrant_close {
+        struct smb2fh *fh;
+        struct callbacks calls;
+};
+
+static void close_on_reject(struct smb2_context *smb2, const char *message)
+{
+        struct reentrant_close *op = smb2_get_opaque(smb2);
+
+        assert(strstr(message, "message id"));
+        smb2_register_error_callback(smb2, NULL);
+        smb2->owning_server = NULL;
+        assert(!smb2_close_async(smb2, op->fh, completed, &op->calls));
+}
+
+static void reject_first_io(struct smb2_context *smb2, int positioned)
+{
+        struct smb2_server server = {0};
+        struct reentrant_close op = {0};
+        smb2_file_id id = {1};
+        uint8_t byte;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        op.fh = smb2_fh_from_file_id(smb2, &id);
+        assert(op.fh);
+        smb2_set_opaque(smb2, &op);
+        smb2_register_error_callback(smb2, close_on_reject);
+        /* Server queueing rejects a client request without a reply ID. */
+        smb2->owning_server = &server;
+        if (positioned) {
+                assert(smb2_pread_async(smb2, op.fh, &byte, 1, 0, completed, &op.calls) < 0);
+        } else {
+                assert(smb2_read_async(smb2, op.fh, &byte, 1, completed, &op.calls) < 0);
+        }
+        assert(!op.calls.completed);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(op.calls.completed == 1);
+        smb2_set_opaque(smb2, NULL);
+}
+
 static void nonread_eof(struct smb2_context *smb2)
 {
         smb2_file_id id = {0};
@@ -534,6 +575,8 @@ int main(void)
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
+        reject_first_io(smb2, 0);
+        reject_first_io(smb2, 1);
         nonread_eof(smb2);
         flush_after_tree_switch(smb2);
         timeout_during_sync_wait(smb2);

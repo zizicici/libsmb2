@@ -2317,16 +2317,7 @@ submit_read_write(struct smb2_context *smb2, struct file_io *io)
                                io->command == SMB2_READ ? "read" : "write");
                 return -EINVAL;
         }
-        if (io->positioned) {
-                fh->pending_positioned++;
-        }
-        if (queue_io_pdu(smb2, pdu, io) < 0) {
-                if (io->positioned) {
-                        positioned_io_done(smb2, fh);
-                }
-                return -EIO;
-        }
-        return 0;
+        return queue_io_pdu(smb2, pdu, io) < 0 ? -EIO : 0;
 }
 
 static int submit_ftruncate(struct smb2_context *, struct file_io *);
@@ -2382,7 +2373,9 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                 } else {
                         fh->io_tail = NULL;
                 }
-                io->cb(smb2, status, reply, io->cb_data);
+                if (io->cb) {
+                        io->cb(smb2, status, reply, io->cb_data);
+                }
                 free(io);
                 /* With no successor, the callback may have closed the handle. */
                 if (!next) {
@@ -2411,7 +2404,7 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
               smb2_command_cb cb, void *cb_data)
 {
         struct file_io *io;
-        int rc;
+        int rc, servicing;
 
         if (smb2 == NULL) {
                 return -EINVAL;
@@ -2460,25 +2453,37 @@ start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command co
         } else if (command == SMB2_CLOSE) {
                 fh->closing = 1;
         }
-        if (io->positioned) {
-                rc = submit_read_write(smb2, io);
-                if (rc < 0) {
-                        free(io);
-                }
-                return rc;
-        }
-        if (fh->io_tail) {
+        if (!position && fh->io_tail) {
                 fh->io_tail->next = io;
                 fh->io_tail = io;
                 return 0;
         }
-        fh->io_head = fh->io_tail = io;
+
+        /* Diagnostics can enqueue another operation or release the context
+         * while the initial submission is still on the stack. */
+        servicing = smb2->servicing;
+        smb2->servicing = 1;
+        if (position) {
+                fh->pending_positioned++;
+        } else {
+                fh->io_head = fh->io_tail = io;
+        }
         rc = submit_file_io(smb2, io);
         if (rc < 0) {
-                fh->io_head = fh->io_tail = NULL;
-                fh->closing = 0;
-                free(io);
+                if (position) {
+                        free(io);
+                        positioned_io_done(smb2, fh);
+                } else {
+                        if (command == SMB2_CLOSE) {
+                                fh->closing = 0;
+                        }
+                        /* Only this call reports failure through its return. */
+                        io->cb = NULL;
+                        file_io_done(smb2, io, rc, NULL);
+                }
         }
+        smb2->servicing = servicing;
+        smb2_finish_dispatch(smb2);
         return rc;
 }
 
