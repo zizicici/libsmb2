@@ -276,9 +276,6 @@ static inline int readv(t_socket sock, struct iovec *iov, int nvecs)
 #define close closesocket
 #endif
 
-void srandom(unsigned int seed);
-int random(void);
-
 int getlogin_r(char *buf, size_t size);
 
 int getpid(void);
@@ -469,8 +466,6 @@ int gethostname(char *name, size_t len);
 #ifdef _IOP
 char *strdup(const char *s);
 
-int random(void);
-void srandom(unsigned int seed);
 time_t time(time_t *tloc);
 int asprintf(char **strp, const char *fmt, ...);
 #endif
@@ -565,8 +560,6 @@ ssize_t readv(t_socket fd, const struct iovec *iov, int iovcnt);
 #include <net/poll.h>
 
 int getlogin_r(char *buf, size_t size);
-void srandom(unsigned int seed);
-int random(void);
 #define getaddrinfo smb2_getaddrinfo
 #define freeaddrinfo smb2_freeaddrinfo
 
@@ -838,8 +831,6 @@ int poll(struct pollfd *fds, unsigned int nfds, int timo);
 #define SOL_TCP 6
 #endif
 
-void srandom(unsigned int seed);
-long random(void);
 int getlogin_r(char *buf, size_t size);
 #endif
 
