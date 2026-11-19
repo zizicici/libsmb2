@@ -135,6 +135,11 @@ case $host in
     ;;
 esac
 AM_CONDITIONAL([HAVE_WIN32], [test "${SYS}" = "mingw32"])
+case $host in
+  *mingw* | *wince*) build_posix_utils=no ;;
+  *) build_posix_utils=yes ;;
+esac
+AM_CONDITIONAL([BUILD_POSIX_UTILS], [test "$build_posix_utils" = yes])
 dnl  libdcerpc (full DCE/RPC) is a separate project in the libdcerpc/
 dnl  subdirectory with its own configure, version and releases. It is
 dnl  Linux and FreeBSD only for now, and can never be built on Windows since its
@@ -159,11 +164,6 @@ AS_IF([test "x$enable_libdcerpc" != "xno"], [
     smb2_abs_srcdir=`cd "$srcdir" && pwd`
     ac_configure_args="$ac_configure_args 'LIBSMB2_CFLAGS=-I$smb2_abs_srcdir/include' 'LIBSMB2_LIBS=$ac_pwd/lib/libsmb2.la'"
     AC_CONFIG_SUBDIRS([libdcerpc])
-case $host in
-  *mingw* | *wince*) build_posix_utils=no ;;
-  *) build_posix_utils=yes ;;
-esac
-AM_CONDITIONAL([BUILD_POSIX_UTILS], [test "$build_posix_utils" = yes])
 ], [
     AC_MSG_NOTICE([libdcerpc disabled])
 ])
