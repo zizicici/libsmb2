@@ -207,6 +207,33 @@ static void expect_io_error(struct smb2_context *smb2, int status, void *reply, 
         (*calls)++;
 }
 
+#ifdef SMB2_O_DIRECTORY
+static void notify_done(struct smb2_context *smb2, int status, void *changes, void *data)
+{
+        int *calls = data;
+        (*calls)++;
+        free_smb2_file_notify_change_information(smb2, changes);
+}
+
+static void watch_path_during_dispatch(struct smb2_context *smb2)
+{
+        struct smb2_create_reply created = {0};
+        struct smb2_change_notify_reply rep = {0};
+        int calls = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        smb2->servicing = 1;
+        assert(!smb2_notify_change_async(smb2, "dir", 0,
+                        SMB2_CHANGE_NOTIFY_FILE_NOTIFY_CHANGE_FILE_NAME, 0, notify_done, &calls));
+        smb2->servicing = 0;
+        reply(smb2, SMB2_CREATE, 0, &created);
+        reply(smb2, SMB2_CHANGE_NOTIFY, 0, &rep);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(calls == 1);
+}
+
+#endif
+
 static void copy_across_tree_switch(struct smb2_context *smb2)
 {
         struct smb2_srv_copychunk chunk = {0};
@@ -938,6 +965,9 @@ int main(void)
         reply(smb2, SMB2_CREATE, SMB2_STATUS_OBJECT_NAME_NOT_FOUND, NULL);
         assert(owner == NULL && smb2->fhs == NULL);
         timeout_batch(smb2);
+#ifdef SMB2_O_DIRECTORY
+        watch_path_during_dispatch(smb2);
+#endif
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
