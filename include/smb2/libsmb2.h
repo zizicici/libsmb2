@@ -335,7 +335,7 @@ int smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents);
  * If you use timeouts with the async API you must make sure to call
  * smb2_service() at least once every second.
  * smb2_service() returns -ETIMEDOUT if a partial frame stalls or a timed-out
- * CREATE receives no final reply within one additional timeout interval.
+ * CREATE or its cleanup CLOSE cannot finish within the cleanup interval.
  * Destroy the context to complete its outstanding callbacks.
  *
  * Default is 0: No timeout.

@@ -528,7 +528,8 @@ close_abandoned_file(struct smb2_context *smb2, uint32_t tree_id, smb2_file_id f
         if (smb2->pdu && smb2->pdu->cleanup_timeout) {
                 pdu->cleanup_timeout = smb2->pdu->cleanup_timeout;
         }
-        pdu->timeout = 0;
+        pdu->cleanup_pending = 1;
+        pdu->timeout = pdu->cleanup_timeout ? time(NULL) + pdu->cleanup_timeout : 0;
         smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
         if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 smb2_close_context(smb2);
@@ -2198,21 +2199,27 @@ remove_io_timer(struct smb2_context *smb2, struct file_io *io)
 
 /* The caller has given up its handle. Keep the queued CLOSE so the server
  * handle can be released after the preceding I/O drains. */
-static void
-expire_deferred_close(struct smb2_context *smb2, struct file_io *io)
+static int
+expire_deferred_close(struct smb2_context *smb2, struct file_io *io, time_t now)
 {
         smb2_command_cb cb = io->cb;
         void *data = io->cb_data;
 
-        io->deadline = 0;
+        if (io->args.close_pdu->cleanup_pending) {
+                smb2_set_error(smb2, "Timed out waiting to send a deferred CLOSE");
+                return -ETIMEDOUT;
+        }
+        io->args.close_pdu->cleanup_pending = 1;
+        io->deadline = now + io->args.close_pdu->cleanup_timeout;
         io->cb = NULL;
         io->cb_data = NULL;
         if (cb) {
                 cb(smb2, -ETIMEDOUT, NULL, data);
         }
+        return 0;
 }
 
-void
+int
 smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
 {
         struct file_io *io;
@@ -2227,7 +2234,10 @@ smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
                 }
                 remove_io_timer(smb2, io);
                 if (io->command == SMB2_CLOSE) {
-                        expire_deferred_close(smb2, io);
+                        if (expire_deferred_close(smb2, io, now) < 0) {
+                                return -ETIMEDOUT;
+                        }
+                        start_io_timer(smb2, io);
                         continue;
                 }
                 /* A deferred non-CLOSE always has a preceding file operation. */
@@ -2247,6 +2257,7 @@ smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
                 }
                 free(io);
         }
+        return 0;
 }
 
 static int
@@ -2281,7 +2292,8 @@ smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu)
         if (pdu->header.command != SMB2_CLOSE || !pdu->cleanup_timeout) {
                 return 0;
         }
-        smb2_set_pdu_deadline(smb2, pdu, 0);
+        pdu->cleanup_pending = 1;
+        pdu->timeout = time(NULL) + pdu->cleanup_timeout;
         pdu->cb = abandoned_close_cb;
         pdu->cb_data = NULL;
         cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL, cb_data);
@@ -2457,7 +2469,10 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
                         if (io->command != SMB2_CLOSE) {
                                 return -ETIMEDOUT;
                         }
-                        expire_deferred_close(smb2, io);
+                        if (expire_deferred_close(smb2, io, time(NULL)) < 0) {
+                                smb2_close_context(smb2);
+                                return -ETIMEDOUT;
+                        }
                 }
         }
         if (io->command == SMB2_CLOSE && fh->pending_positioned) {

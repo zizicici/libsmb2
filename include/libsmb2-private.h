@@ -467,7 +467,7 @@ struct smb2_pdu {
         unsigned char *crypt;
         time_t timeout;
         int cleanup_timeout; /* time allowed for a detached handle operation */
-        int waiting_for_late_create;
+        int cleanup_pending;
 };
 
 struct smb2_dirent_internal {
@@ -869,7 +869,7 @@ int smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh,
 int smb2_expire_sent_create(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu);
 int smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu);
-void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
+int smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
 /* queue_prev points to the link that owns the PDU, including the queue head. */
 static inline void
 smb2_append_pdu(struct smb2_context *smb2, struct smb2_pdu **queue, struct smb2_pdu *pdu)

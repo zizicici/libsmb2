@@ -127,7 +127,7 @@ static void run(struct smb2_context *smb2, enum operation op)
                 smb2->outqueue->timeout = time(NULL) - 1;
                 assert(!smb2_service(smb2, 0));
                 assert(result.completed == 1 && result.status == -ETIMEDOUT);
-                assert(smb2->outqueue && !smb2->outqueue->timeout);
+                assert(smb2->outqueue && smb2->outqueue->timeout > time(NULL));
                 smb2->credits = 1;
                 assert(!smb2_service(smb2, POLLOUT));
                 assert(smb2->waitqueue && smb2->waitqueue->timeout > time(NULL));

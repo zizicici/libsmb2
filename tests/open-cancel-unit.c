@@ -358,7 +358,7 @@ static void close_waiting_for_credit(struct smb2_context *smb2)
         smb2_set_timeout(smb2, 0);
         smb2->outqueue->timeout = time(NULL) - 1;
         assert(!smb2_service(smb2, 0) && expired == 1 && smb2->fhs == previous);
-        assert(smb2->outqueue && smb2->outqueue->timeout == 0);
+        assert(smb2->outqueue && smb2->outqueue->timeout > time(NULL));
         smb2->credits = 32;
         assert(!smb2_service(smb2, POLLOUT));
         assert(smb2->waitqueue && smb2->waitqueue->timeout > time(NULL));
@@ -415,7 +415,7 @@ static void directory_close_waiting_for_credit(struct smb2_context *smb2)
         assert(smb2->outqueue && !smb2->waitqueue);
         smb2->outqueue->timeout = time(NULL) - 1;
         assert(!smb2_service(smb2, 0) && expired == 1 && !smb2->dirs);
-        assert(smb2->outqueue && !smb2->outqueue->timeout);
+        assert(smb2->outqueue && smb2->outqueue->timeout > time(NULL));
         smb2->credits = 32;
         assert(!smb2_service(smb2, POLLOUT));
         reply(smb2, SMB2_CLOSE, 0, NULL);
