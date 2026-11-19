@@ -13,6 +13,8 @@ noinst_PROGRAMS += sync-stat-unit
 
 noinst_PROGRAMS += set-info-unit
 
+noinst_PROGRAMS += open-cancel-unit prog_sequential_io
+
 EXTRA_PROGRAMS = ld_sockerr
 CLEANFILES = ld_sockerr.o ld_sockerr.so
 
