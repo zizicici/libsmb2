@@ -80,6 +80,9 @@ static void cancel_directory(struct smb2_context *smb2, enum smb2_command stage)
         assert(owner);
         if (stage == SMB2_CREATE) {
                 smb2_free_pdu(smb2, owner);
+                smb2->waitqueue->timeout = time(NULL) - 1;
+                smb2->may_have_timed_pdus = 1;
+                assert(!smb2_service(smb2, 0));
         }
         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
         if (stage != SMB2_CREATE) {
@@ -155,6 +158,9 @@ static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage st
                 reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
                 smb2_free_pdu(smb2, owner);
                 if (stage == RETRY_SENT) {
+                        smb2->waitqueue->timeout = time(NULL) - 1;
+                        smb2->may_have_timed_pdus = 1;
+                        assert(!smb2_service(smb2, 0));
                         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
                         reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
                 }
@@ -697,6 +703,39 @@ static void partial_reply_timeout(int sync_wait)
         close(pair[1]);
 }
 
+static void partial_cancelled_create(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct callbacks calls = {0};
+        struct smb2_pdu *owner;
+        uint8_t header[SMB2_SPL_SIZE + SMB2_HEADER_SIZE];
+        int pair[2];
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        assert(!fcntl(pair[0], F_SETFL, O_NONBLOCK));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        assert(!smb2_connect_tree_id(smb2, 1));
+        smb2_set_timeout(smb2, 30);
+        owner = smb2_open_async_pdu(smb2, "file", O_RDONLY, completed, &calls, released);
+        assert(owner && owner == smb2->waitqueue);
+        owner->timeout = time(NULL) - 1;
+        smb2_free_pdu(smb2, owner);
+        smb2_set_timeout(smb2, 0);
+        assert(!smb2_service(smb2, 0) && smb2->waitqueue);
+        assert(recv(pair[1], header, sizeof(header), MSG_WAITALL) == sizeof(header));
+        memset(header, 0, SMB2_SPL_SIZE);
+        header[3] = SMB2_HEADER_SIZE + (SMB2_CREATE_REPLY_SIZE & ~1);
+        header[SMB2_SPL_SIZE + 16] = SMB2_FLAGS_SERVER_TO_REDIR;
+        assert(write(pair[1], header, sizeof(header)) == sizeof(header));
+        assert(!smb2_service(smb2, POLLIN) && smb2->pdu && smb2->pdu->timeout > time(NULL));
+        smb2->pdu->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == -ETIMEDOUT);
+        smb2_destroy_context(smb2);
+        assert(calls.completed == 0 && calls.released == 1);
+        close(pair[1]);
+}
+
 static void partial_send_timeout(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -769,6 +808,7 @@ int main(void)
         close(pair[1]);
         sync_buffers_after_failed_wait();
         sync_stat_after_failed_wait();
+        partial_cancelled_create();
         partial_send_timeout();
         partial_reply_timeout(0);
         partial_reply_timeout(1);

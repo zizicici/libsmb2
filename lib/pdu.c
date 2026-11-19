@@ -180,6 +180,9 @@ smb2_allocate_pdu(struct smb2_context *smb2, enum smb2_command command,
 
         if (smb2->timeout) {
                 pdu->timeout = time(NULL) + smb2->timeout;
+                if (command == SMB2_CREATE) {
+                        pdu->cleanup_timeout = smb2->timeout > 0 ? smb2->timeout : 1;
+                }
         }
 
         return pdu;
@@ -1399,7 +1402,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
          */
         pdu = smb2->waitqueue;
         while (pdu) {
-                if (pdu->timeout && pdu->timeout < t) {
+                if (pdu->timeout && pdu->timeout < t && !smb2_waiting_for_create_cleanup(pdu)) {
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         if (pdu->cb) {
                                 pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,

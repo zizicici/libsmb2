@@ -926,6 +926,10 @@ read_more_data:
                                 }
 
                                 SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+                                if (pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
+                                        /* Allow a full interval for the body of a late CREATE reply. */
+                                        pdu->timeout = time(NULL) + pdu->cleanup_timeout;
+                                }
                         } else {
                                 /* oplock and lease break notifications won't have a pdu so make one
                                  * oplock replies (that are NOT notifications, i.e. have a valid message_id)

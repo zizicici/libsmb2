@@ -1991,6 +1991,20 @@ open_cb(struct smb2_context *smb2, int status, void *reply, void *data)
         dispatch_create(fh->cancel_pdu, open_created, smb2, status, reply, fh);
 }
 
+/* After cancellation a successful CREATE still needs a CLOSE, even if its
+ * original caller's deadline has elapsed. This includes symlink retries. */
+int
+smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu)
+{
+        if (pdu->cb == open_cb) {
+                return ((const struct smb2fh *)pdu->cb_data)->cb == NULL;
+        }
+        if (pdu->cb == opendir_cb) {
+                return ((const struct smb2dir *)pdu->cb_data)->cb == NULL;
+        }
+        return 0;
+}
+
 static struct smb2_pdu *
 _smb2_open_async_with_oplock_or_lease(struct smb2_context *smb2, const char *path, int flags,
                 uint8_t oplock_level, uint32_t lease_state, smb2_lease_key lease_key,
