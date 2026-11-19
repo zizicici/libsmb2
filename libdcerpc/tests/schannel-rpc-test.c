@@ -72,9 +72,10 @@ smb2_is_dispatching(struct smb2_context *smb2 _U_)
 
 /* The sync wait test loses its transport after the request is queued. */
 int
-smb2_service(struct smb2_context *smb2 _U_, int revents _U_)
+smb2_service(struct smb2_context *smb2, int revents _U_)
 {
-        return -EIO;
+        smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
+        return -ETIMEDOUT;
 }
 #endif
 
@@ -394,6 +395,7 @@ test_sync_wait(void)
         dispatching = 0;
         CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
         CHECK(last_cb != NULL);
+        CHECK(strstr(dcerpc_get_error(s.dce), "partial SMB frame") != NULL);
         CHECK(session_call(&s) == -EIO && sent_len == 0);
         CHECK(dcerpc_connect_context_async(s.dce, "netlogon", &netlogon_syntax,
                                            call_cb, NULL) == -EIO);
@@ -401,6 +403,15 @@ test_sync_wait(void)
         reply(s.smb2, 0, rep_l5_hsign, sizeof(rep_l5_hsign));
         CHECK(got[0] == 0);
         session_close(&s);
+
+        s.smb2 = smb2_init_context();
+        s.dce = dcerpc_create_context(s.smb2);
+        CHECK(s.smb2 && s.dce);
+        CHECK(dcerpc_connect_context(s.dce, "netlogon", &netlogon_syntax) == -ETIMEDOUT);
+        CHECK(strstr(dcerpc_get_error(s.dce), "partial SMB frame") != NULL);
+        last_cb(s.smb2, SMB2_STATUS_SHUTDOWN, NULL, last_priv);
+        dcerpc_destroy_context(s.dce);
+        smb2_destroy_context(s.smb2);
 }
 #endif
 

@@ -3587,6 +3587,8 @@ static int
 dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                       struct dcerpc_sync_cb_data *scb)
 {
+        int rc = 0;
+
         while (!scb->is_finished) {
                 struct pollfd pfd = {0};
 
@@ -3594,13 +3596,19 @@ dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                 pfd.events = smb2_which_events(smb2);
                 if (poll(&pfd, 1, 1000) < 0) {
                         if (errno != EINTR) {
-                                smb2_set_error(smb2, "Poll failed");
+                                rc = -errno;
+                                smb2_set_error(smb2, "Poll failed: %s", strerror(-rc));
                                 break;
                         }
                         pfd.revents = 0;
                 }
                 /* Service on idle ticks and after signals to run SMB timeouts. */
-                if (smb2_service(smb2, pfd.revents) < 0) {
+                rc = smb2_service(smb2, pfd.revents);
+                if (rc < 0) {
+                        /* The transport uses -1 for generic socket errors. */
+                        if (rc == -1) {
+                                rc = -EIO;
+                        }
                         break;
                 }
         }
@@ -3608,8 +3616,9 @@ dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                 return scb->status;
         }
 
-        dcerpc_fail_pipe(dce, -EIO, "Transport wait failed with an RPC still pending");
-        return -EIO;
+        /* Keep the diagnostic set by poll or the transport. */
+        dcerpc_fail_pipe(dce, rc, NULL);
+        return rc;
 }
 
 void *
