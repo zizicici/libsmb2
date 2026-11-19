@@ -394,6 +394,9 @@ test_sync_wait(void)
         dispatching = 0;
         CHECK(dcerpc_call(s.dce, 0x15, req_coder, NULL, rep_coder, 8) == NULL);
         CHECK(last_cb != NULL);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        CHECK(dcerpc_connect_context_async(s.dce, "netlogon", &netlogon_syntax,
+                                           call_cb, NULL) == -EIO);
         memset(got, 0, sizeof(got));
         reply(s.smb2, 0, rep_l5_hsign, sizeof(rep_l5_hsign));
         CHECK(got[0] == 0);
@@ -417,6 +420,7 @@ test_fragment_write(unsigned shortfall)
         last_cb(s.smb2, 0, &written, last_priv);
         if (shortfall) {
                 CHECK(cb_done == 1 && cb_status == -EIO && sent_len == 0);
+                CHECK(session_call(&s) == -EIO && sent_len == 0);
         } else {
                 CHECK(cb_done == 0 && sent_len > 0);
                 last_cb(s.smb2, SMB2_STATUS_END_OF_FILE, NULL, last_priv);

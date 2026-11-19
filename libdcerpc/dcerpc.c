@@ -223,6 +223,7 @@ struct dcerpc_context {
         struct smb2_context *smb2;
         struct dcerpc_pending *pending;
         int destroying;
+        int pipe_failed;
         unsigned active;
         /*
          * Set when dcerpc_create_context_smb() allocated/connected the
@@ -289,6 +290,9 @@ dcerpc_need_smb2(struct dcerpc_context *dce)
 {
         if (dce->destroying) {
                 return -ECANCELED;
+        }
+        if (dce->pipe_failed) {
+                return -EIO;
         }
         if (dce->smb2 == NULL) {
                 dcerpc_set_error(dce, "No smb2 context, this dcerpc context "
@@ -1136,8 +1140,10 @@ dcerpc_connect_context_async(struct dcerpc_context *dce, const char *path,
                              p_syntax_id_t *syntax,
                              dcerpc_cb cb, void *cb_data)
 {
-        if (dcerpc_need_smb2(dce)) {
-                return -EINVAL;
+        int rc = dcerpc_need_smb2(dce);
+
+        if (rc) {
+                return rc;
         }
         dce->call_id = 2;
         dce->path = strdup(path);
@@ -1256,29 +1262,32 @@ dcerpc_free_context(struct dcerpc_context *dce)
         free(dce);
 }
 
-void
-dcerpc_destroy_context(struct dcerpc_context *dce)
+/* Late SMB replies still own the pending records. Their stage callbacks
+ * release those records without decoding or calling the application again. */
+static void
+dcerpc_cancel_pending(struct dcerpc_context *dce, int status)
 {
         struct dcerpc_pending *p;
 
-        if (dce == NULL || dce->destroying) {
-                return;
-        }
-        dce->destroying = 1;
-        dce->active++;
-
-        /*
-         * Cancel requests still in flight. Their SMB2 callbacks will run
-         * later (reply, or smb2_destroy_context()) and must not touch dce.
-         */
         while ((p = dce->pending) != NULL) {
                 dce->pending = p->next;
                 p->next = NULL;
                 p->orphaned = 1;
                 if (p->cb) {
-                        p->cb(dce, -ECANCELED, NULL, p->cb_data);
+                        p->cb(dce, status, NULL, p->cb_data);
                 }
         }
+}
+
+void
+dcerpc_destroy_context(struct dcerpc_context *dce)
+{
+        if (dce == NULL || dce->destroying) {
+                return;
+        }
+        dce->destroying = 1;
+        dce->active++;
+        dcerpc_cancel_pending(dce, -ECANCELED);
 
         if (!--dce->active) {
                 dcerpc_free_context(dce);
@@ -1292,6 +1301,18 @@ dcerpc_leave(struct dcerpc_context *dce)
         if (!--dce->active && dce->destroying) {
                 dcerpc_free_context(dce);
         }
+}
+
+/* An incomplete exchange can leave unread pipe data and advance only one
+ * side of the Schannel sequence. A fresh association is required. */
+static void
+dcerpc_fail_pipe(struct dcerpc_context *dce, const char *reason)
+{
+        dce->active++;
+        dce->pipe_failed = 1;
+        dcerpc_set_error(dce, "%s. Open a new RPC association", reason);
+        dcerpc_cancel_pending(dce, -EIO);
+        dcerpc_leave(dce);
 }
 
 /* A decoder or diagnostic can call application code before we have finished
@@ -3346,9 +3367,8 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
         }
         length = dcerpc_request_frag_length(pdu);
         if (!rep || rep->count != length) {
-                dcerpc_set_error(dce, "Incomplete DCERPC fragment WRITE (%u of %u bytes)",
-                                 rep ? rep->count : 0, length);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                dcerpc_fail_pipe(dce, "Incomplete DCERPC fragment WRITE");
+                dcerpc_free_pdu(NULL, pdu);
                 return;
         }
         pdu->frag_pos += length;
@@ -3427,8 +3447,9 @@ dcerpc_submit_call(struct dcerpc_context *dce,
         size_t max_frag, len;
         int rc;
 
-        if (dcerpc_need_smb2(dce)) {
-                return -EINVAL;
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                return rc;
         }
 
         pdu = dcerpc_encode_request(dce, opnum, req_coder, req, &iov);
@@ -3544,8 +3565,6 @@ static int
 dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                       struct dcerpc_sync_cb_data *scb)
 {
-        struct dcerpc_pending *p;
-
         while (!scb->is_finished) {
                 struct pollfd pfd = {0};
 
@@ -3567,16 +3586,8 @@ dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                 return scb->status;
         }
 
-        /* The decoder may borrow the synchronous caller's request. Make a
-         * late SMB completion take the same cleanup path as context teardown. */
-        for (p = dce->pending; p; p = p->next) {
-                if (p->cb == dcerpc_call_sync_cb && p->cb_data == scb) {
-                        dcerpc_untrack(dce, p);
-                        p->orphaned = 1;
-                        break;
-                }
-        }
-        return -1;
+        dcerpc_fail_pipe(dce, "Transport wait failed with an RPC still pending");
+        return -EIO;
 }
 
 void *
