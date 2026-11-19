@@ -362,7 +362,11 @@ static int sync_file_io(struct smb2_context *smb2, struct smb2fh *fh,
         if (sync_in_service(smb2)) {
                 return -EDEADLK;
         }
-        if (!smb2 || !fh || (count && !buf)) {
+        if (!fh || (count && !buf)) {
+                smb2_set_error(smb2, !fh ? "File handle was NULL" : "Missing buffer for file I/O");
+                return -EINVAL;
+        }
+        if (!smb2) {
                 return -EINVAL;
         }
         count = smb2_file_io_length(smb2, command, count);

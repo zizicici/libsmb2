@@ -2493,26 +2493,19 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
                 return -EINVAL;
         }
         if (fh == NULL) {
-                if (position) {
-                        smb2_set_error(smb2, "File handle was NULL");
-                }
+                smb2_set_error(smb2, "File handle was NULL");
                 return -EINVAL;
         }
         if (fh->closing) {
                 return -EBADF;
         }
         if (count && !buf) {
-                if (position) {
-                        smb2_set_error(smb2, "Missing buffer for file I/O");
-                }
+                smb2_set_error(smb2, "Missing buffer for file I/O");
                 return -EINVAL;
         }
         io = calloc(1, sizeof(*io));
         if (io == NULL) {
-                if (position) {
-                        smb2_set_error(smb2, "Failed to allocate %s request",
-                                       command == SMB2_READ ? "read" : "write");
-                }
+                smb2_set_error(smb2, "Failed to allocate file I/O request");
                 return -ENOMEM;
         }
         io->fh = fh;

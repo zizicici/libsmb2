@@ -734,6 +734,9 @@ int main(void)
         smb2->credits = 32;
         assert(smb2_connect_tree_id(smb2, 1) == 0);
         assert(smb2_connect_tree_id(smb2, 2) == 0);
+        smb2_set_error(smb2, "previous error");
+        assert(smb2_fsync_async(smb2, NULL, NULL, NULL) == -EINVAL);
+        assert(strstr(smb2_get_error(smb2), "File handle was NULL"));
         cancel_directory(smb2, SMB2_CREATE);
         cancel_directory(smb2, SMB2_QUERY_DIRECTORY);
         cancel_directory(smb2, SMB2_CLOSE);
