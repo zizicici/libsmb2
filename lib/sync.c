@@ -349,51 +349,81 @@ int smb2_fsync(struct smb2_context *smb2, struct smb2fh *fh)
 	return rc;
 }
 
-/* A failed wait can leave the PDU in flight or behind an earlier file
- * operation. Its buffer must live until the asynchronous completion. */
+/* A failed wait can leave the PDU in flight. Its buffer is reusable only
+ * after the asynchronous operation finishes, including during shutdown. */
+struct sync_io_buffer {
+        size_t capacity;
+        struct sync_cb_data *waiter;
+        uint8_t bytes[];
+};
+
+static void sync_io_done(struct smb2_context *smb2, int status, void *reply _U_, void *private_data)
+{
+        struct sync_io_buffer *buffer = private_data;
+        struct sync_cb_data *waiter = buffer->waiter;
+
+        if (waiter) {
+                if (waiter->ptr && status > 0) {
+                        memcpy(waiter->ptr, buffer->bytes, status);
+                }
+                waiter->status = status;
+                waiter->is_finished = 1;
+                buffer->waiter = NULL;
+        }
+        if (smb2->sync_io_buffer) {
+                free(buffer);
+        } else {
+                smb2->sync_io_buffer = buffer;
+        }
+}
+
 static int sync_file_io(struct smb2_context *smb2, struct smb2fh *fh,
                         enum smb2_command command, void *buf, uint32_t count,
                         const uint64_t *position)
 {
-        struct sync_cb_data *data;
-        uint8_t *buffer;
+        struct sync_cb_data waiter = {0};
+        struct sync_io_buffer *buffer;
         int rc;
 
         if (sync_in_service(smb2)) {
                 return -EDEADLK;
         }
+        if (!smb2) {
+                return -EINVAL;
+        }
         if (!fh || (count && !buf)) {
                 smb2_set_error(smb2, !fh ? "File handle was NULL" : "Missing buffer for file I/O");
                 return -EINVAL;
         }
-        if (!smb2) {
-                return -EINVAL;
-        }
         count = smb2_file_io_length(smb2, command, count);
-        data = calloc(1, sizeof(*data) + count);
-        if (!data) {
-                smb2_set_error(smb2, "Failed to allocate synchronous I/O buffer");
-                return -ENOMEM;
-        }
-        buffer = (uint8_t *)(data + 1);
-        if (command == SMB2_WRITE && count) {
-                memcpy(buffer, buf, count);
-        }
-        rc = smb2_start_file_io(smb2, fh, command, buffer, count, position,
-                                sync_generic_status_cb, data);
-        if (rc == 0) {
-                rc = wait_for_reply(smb2, data);
-                if (rc < 0 && !data->is_finished) {
-                        data->status = SMB2_STATUS_CANCELLED;
-                        return rc;
+        buffer = smb2->sync_io_buffer;
+        if (!buffer || buffer->capacity < count) {
+                buffer = realloc(buffer, sizeof(*buffer) + count);
+                if (!buffer) {
+                        smb2_set_error(smb2, "Failed to allocate synchronous I/O buffer");
+                        return -ENOMEM;
                 }
-                rc = data->status;
-                if (command == SMB2_READ && rc > 0) {
-                        memcpy(buf, buffer, rc);
-                }
+                buffer->capacity = count;
         }
-        free(data);
-        return rc;
+        smb2->sync_io_buffer = NULL;
+        buffer->waiter = &waiter;
+        if (command == SMB2_READ) {
+                waiter.ptr = buf;
+        } else if (count) {
+                memcpy(buffer->bytes, buf, count);
+        }
+        rc = smb2_start_file_io(smb2, fh, command, buffer->bytes, count, position,
+                                sync_io_done, buffer);
+        if (rc < 0) {
+                free(buffer);
+                return rc;
+        }
+        rc = wait_for_reply(smb2, &waiter);
+        if (rc < 0 && !waiter.is_finished) {
+                buffer->waiter = NULL;
+                return rc;
+        }
+        return waiter.status;
 }
 
 int smb2_pread(struct smb2_context *smb2, struct smb2fh *fh,

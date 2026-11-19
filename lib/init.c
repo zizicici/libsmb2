@@ -708,6 +708,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
         if (smb2->on_active_list) {
                 SMB2_LIST_REMOVE(&active_contexts, smb2);
         }
+        free(smb2->sync_io_buffer);
         free(smb2);
 }
 

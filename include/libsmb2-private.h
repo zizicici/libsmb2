@@ -302,6 +302,7 @@ struct smb2_context {
          * smb2_destroy_context().
          */
         struct smb2fh *fhs;
+        struct sync_io_buffer *sync_io_buffer;
         struct file_io *io_timers, *last_io_timer, *next_io_timer;
         struct smb2dir *dirs;
 
