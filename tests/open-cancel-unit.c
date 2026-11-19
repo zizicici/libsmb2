@@ -335,6 +335,30 @@ static void flush_after_tree_switch(struct smb2_context *smb2)
         assert(calls.completed == 2);
 }
 
+static void expect_io_error(struct smb2_context *smb2, int status, void *reply, void *data)
+{
+        int *calls = data;
+        assert(status == -EIO && reply == NULL);
+        (*calls)++;
+}
+
+static void nonread_eof(struct smb2_context *smb2)
+{
+        smb2_file_id id = {0};
+        struct smb2fh *fh;
+        int calls = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh && !smb2_fsync_async(smb2, fh, expect_io_error, &calls));
+        assert(!smb2_ftruncate_async(smb2, fh, 10, expect_io_error, &calls));
+        assert(!smb2_close_async(smb2, fh, expect_io_error, &calls));
+        reply(smb2, SMB2_FLUSH, SMB2_STATUS_END_OF_FILE, NULL);
+        reply(smb2, SMB2_SET_INFO, SMB2_STATUS_END_OF_FILE, NULL);
+        reply(smb2, SMB2_CLOSE, SMB2_STATUS_END_OF_FILE, NULL);
+        assert(calls == 3);
+}
+
 static void close_after_positioned_io(struct smb2_context *smb2)
 {
         struct callbacks calls = {0};
@@ -506,6 +530,7 @@ int main(void)
         copy_across_tree_switch(smb2);
         seek_during_positioned_io(smb2);
         close_after_positioned_io(smb2);
+        nonread_eof(smb2);
         flush_after_tree_switch(smb2);
         timeout_during_sync_wait(smb2);
         disconnect_during_copy(smb2, pair[1]);

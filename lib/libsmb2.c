@@ -539,10 +539,9 @@ abandon_opendir(void *private_data)
         }
 }
 
-/* END_OF_FILE translates to zero for reads, but cannot produce an open
- * handle or a successful directory listing. */
+/* END_OF_FILE is a successful result only for operations that consume it. */
 static int
-open_error(int status)
+command_error(int status)
 {
         int err = nterror_to_errno(status);
         return err ? -err : -EIO;
@@ -597,7 +596,7 @@ od_close_cb(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
-                opendir_complete(smb2, dir, open_error(status));
+                opendir_complete(smb2, dir, command_error(status));
                 return;
         }
 
@@ -684,7 +683,7 @@ query_cb(struct smb2_context *smb2, int status,
         smb2_set_nterror(smb2, status, "Query directory failed with (0x%08x) %s. %s",
                        status, nterror_to_str(status),
                        smb2_get_error(smb2));
-        opendir_complete(smb2, dir, open_error(status));
+        opendir_complete(smb2, dir, command_error(status));
 }
 
 /* Keep the transport's CREATE alive if the application frees its PDU
@@ -724,7 +723,7 @@ opendir_created(struct smb2_context *smb2, int status,
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Opendir failed with (0x%08x) %s.",
                                status, nterror_to_str(status));
-                opendir_complete(smb2, dir, open_error(status));
+                opendir_complete(smb2, dir, command_error(status));
                 return;
         }
 
@@ -1969,14 +1968,14 @@ open_created(struct smb2_context *smb2, int status,
                  * We could not work out where the link went. Report that
                  * rather than the bare STOPPED_ON_SYMLINK.
                  */
-                open_complete(smb2, fh, open_error(status));
+                open_complete(smb2, fh, command_error(status));
                 return;
         }
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Open failed with (0x%08x) %s.",
                                status, nterror_to_str(status));
-                open_complete(smb2, fh, open_error(status));
+                open_complete(smb2, fh, command_error(status));
                 return;
         }
 
@@ -2163,7 +2162,7 @@ close_cb(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
         }
-        file_io_done(smb2, io, -nterror_to_errno(status), NULL);
+        file_io_done(smb2, io, status ? command_error(status) : 0, NULL);
         free_smb2fh(smb2, fh);
 }
 
@@ -2191,7 +2190,7 @@ fsync_cb(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, status, "Flush failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
         }
-        file_io_done(smb2, private_data, -nterror_to_errno(status), NULL);
+        file_io_done(smb2, private_data, status ? command_error(status) : 0, NULL);
 }
 
 static int
@@ -3606,7 +3605,7 @@ ftruncate_cb(struct smb2_context *smb2, int status,
                 smb2_set_nterror(smb2, status, "Truncate failed with "
                                  "(0x%08x) %s", status, nterror_to_str(status));
         }
-        file_io_done(smb2, private_data, -nterror_to_errno(status), NULL);
+        file_io_done(smb2, private_data, status ? command_error(status) : 0, NULL);
 }
 
 static int
