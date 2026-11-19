@@ -906,19 +906,6 @@ smb2_unlink_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         pdu->next = NULL;
 }
 
-static inline void
-smb2_set_pdu_deadline(struct smb2_context *smb2, struct smb2_pdu *pdu, time_t deadline)
-{
-        if (pdu->queue_prev) {
-                if (deadline && !pdu->timeout) {
-                        smb2->num_timed_pdus++;
-                } else if (!deadline && pdu->timeout) {
-                        smb2->num_timed_pdus--;
-                }
-        }
-        pdu->timeout = deadline;
-}
-
 int smb2_timeout_pdus(struct smb2_context *smb2);
 
 struct connect_data;                                           /* defined in libsmb2.c */

@@ -75,11 +75,12 @@ static void cancel_directory(struct smb2_context *smb2, enum smb2_command stage)
         struct smb2_create_reply created = {0};
 
         assert(smb2_select_tree_id(smb2, 1) == 0);
+        smb2_set_timeout(smb2, 30);
         owner = smb2_opendir_async_pdu(smb2, "", completed, &calls, released);
         assert(owner);
         if (stage == SMB2_CREATE) {
                 smb2_free_pdu(smb2, owner);
-                smb2_set_pdu_deadline(smb2, smb2->waitqueue, time(NULL) - 1);
+                smb2->waitqueue->timeout = time(NULL) - 1;
                 assert(!smb2_service(smb2, 0));
         }
         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
@@ -96,6 +97,7 @@ static void cancel_directory(struct smb2_context *smb2, enum smb2_command stage)
         reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
         assert(calls.completed == 0 && calls.released == 1);
         assert(smb2->dirs == NULL);
+        smb2_set_timeout(smb2, 0);
 }
 
 static void directory_query_failure(struct smb2_context *smb2)
@@ -138,6 +140,7 @@ static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage st
         link.byte_count = sizeof(target);
         link.error_data = target;
         assert(smb2_select_tree_id(smb2, 1) == 0);
+        smb2_set_timeout(smb2, 30);
         owner = smb2_open_async_pdu(smb2, "link", O_RDONLY, completed, &calls, released);
         assert(owner);
         if (stage == LINK_WALK_ERROR) {
@@ -156,7 +159,7 @@ static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage st
                 reply(smb2, SMB2_CREATE, SMB2_STATUS_STOPPED_ON_SYMLINK, &link);
                 smb2_free_pdu(smb2, owner);
                 if (stage == RETRY_SENT) {
-                        smb2_set_pdu_deadline(smb2, smb2->waitqueue, time(NULL) - 1);
+                        smb2->waitqueue->timeout = time(NULL) - 1;
                         assert(!smb2_service(smb2, 0));
                         reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
                         reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
@@ -166,6 +169,7 @@ static void cancel_symlink_retry(struct smb2_context *smb2, enum cancel_stage st
         smb2->credits = 32;
         assert(calls.released == 1 && calls.completed == 0);
         assert(smb2->fhs == NULL);
+        smb2_set_timeout(smb2, 0);
 }
 
 static void cancel_other_open(struct smb2_context *smb2, int status, void *data, void *priv)
@@ -846,6 +850,30 @@ static void partial_unmatched_reply(int encrypted)
         close(pair[1]);
 }
 
+static void missing_close_credit(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        smb2_file_id id = {1};
+        struct smb2fh *fh;
+        int pair[2], expired = 0;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 0;
+        fh = smb2_fh_from_file_id(smb2, &id);
+        smb2_set_timeout(smb2, 10);
+        assert(fh && !smb2_close_async(smb2, fh, expect_timeout, &expired));
+        smb2->outqueue->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && expired == 1);
+        assert(smb2->outqueue->timeout > time(NULL));
+        smb2->outqueue->timeout = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == -ETIMEDOUT);
+        assert(!SMB2_VALID_SOCKET(smb2->fd));
+        smb2_destroy_context(smb2);
+        assert(expired == 1);
+        close(pair[1]);
+}
+
 static void missing_create_reply(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -984,6 +1012,7 @@ int main(void)
         sync_buffers_after_failed_wait();
         sync_stat_after_failed_wait();
         missing_create_reply();
+        missing_close_credit();
         partial_cancelled_create();
         partial_unmatched_reply(0);
         partial_unmatched_reply(1);
