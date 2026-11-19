@@ -265,7 +265,7 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ])
 SMB2_PC_REQUIRES=""
 SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
-AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC$MAYBE_LIBKRB5"], [
+AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC$MAYBE_LIBKRB5$MAYBE_LIBRDMACM"], [
     AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
 ])
 AS_CASE([$MAYBE_LIBKRB5], [*gssapi_krb5*], [
@@ -288,6 +288,13 @@ SMB2_PC_QUIC_LIBS="$MAYBE_LIBQUIC"
 AS_IF([test -n "$MAYBE_LIBQUIC" && test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists gnutls], [
     SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }gnutls"
     SMB2_PC_QUIC_LIBS="-lquic"
+])
+AS_IF([test -n "$MAYBE_LIBRDMACM" && test -n "$PKG_CONFIG"], [
+    for module in librdmacm libibverbs; do
+        AS_IF(["$PKG_CONFIG" --exists "$module"], [
+            SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }$module"
+        ])
+    done
 ])
 dnl Preserve search paths for private libraries not supplied by a .pc file.
 SMB2_PC_LIBDIRS=""
