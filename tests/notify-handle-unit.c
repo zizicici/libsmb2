@@ -23,21 +23,17 @@ static void reply(struct smb2_context *smb2, enum smb2_command command,
                   int status, void *data)
 {
         struct smb2_pdu *pdu = smb2->waitqueue;
+        smb2_command_cb cb;
+        void *private_data;
 
         assert(pdu && pdu->header.command == command);
         assert(pdu->header.sync.tree_id == 1);
         assert(smb2_select_tree_id(smb2, 2) == 0);
         smb2->credits++; /* grant one credit with each mock reply */
-        smb2->waitqueue = pdu->next;
-        pdu->next = NULL;
-        smb2->pdu = pdu;
-        if (pdu->cb) {
-                pdu->cb(smb2, status, data, pdu->cb_data);
-        }
-        if (!pdu->caller_frees_pdu) {
-                smb2_free_pdu(smb2, pdu);
-        }
-        smb2->pdu = NULL;
+        cb = pdu->cb;
+        private_data = pdu->cb_data;
+        smb2_free_pdu(smb2, pdu);
+        cb(smb2, status, data, private_data);
 }
 
 static void expect_io_error(struct smb2_context *smb2, int status, void *reply, void *data)
