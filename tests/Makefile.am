@@ -11,7 +11,7 @@ noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit lseek-unit
 
 noinst_PROGRAMS += sync-stat-unit
 
-noinst_PROGRAMS += set-info-unit
+noinst_PROGRAMS += set-info-unit io-limits-unit
 
 noinst_PROGRAMS += entropy-unit
 noinst_PROGRAMS += prog_sequential_io
@@ -46,6 +46,7 @@ T = "$(srcdir)"/test_*.sh
 test: $(noinst_PROGRAMS) $(bin_SCRIPTS)
 	./aes128ccm-test
 	./notify-handle-unit
+	./io-limits-unit
 	srcdir="$(srcdir)"; export srcdir; for TEST in $(T); do \
 		echo "Running $$TEST"; \
 		echo "--------------"; \
