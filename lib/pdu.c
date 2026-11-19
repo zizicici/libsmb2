@@ -36,6 +36,7 @@
 #endif
 
 #ifdef HAVE_STRING_H
+#include <errno.h>
 #include <string.h>
 #endif
 
