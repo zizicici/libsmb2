@@ -282,19 +282,6 @@ AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
     AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
         SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }libcrypto >= 3"
         SMB2_PC_CRYPTO_LIBS=""
-    ], [
-        crypto_search_dirs=""
-        expect_libdir=no
-        for flag in $LDFLAGS; do
-            AS_IF([test "$expect_libdir" = yes], [
-                crypto_search_dirs="$crypto_search_dirs -L$flag"
-                expect_libdir=no
-            ], [
-                AS_CASE([$flag], [-L], [expect_libdir=yes],
-                        [-L*], [crypto_search_dirs="$crypto_search_dirs $flag"])
-            ])
-        done
-        SMB2_PC_CRYPTO_LIBS="$crypto_search_dirs $MAYBE_LIBCRYPTO"
     ])
 ])
 SMB2_PC_QUIC_LIBS="$MAYBE_LIBQUIC"
@@ -302,6 +289,21 @@ AS_IF([test -n "$MAYBE_LIBQUIC" && test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exis
     SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }gnutls"
     SMB2_PC_QUIC_LIBS="-lquic"
 ])
+dnl Preserve search paths for private libraries not supplied by a .pc file.
+SMB2_PC_LIBDIRS=""
+AS_IF([test -n "$SMB2_PC_QUIC_LIBS$MAYBE_LIBRDMACM$SMB2_PC_CRYPTO_LIBS$MAYBE_LIBKRB5"], [
+    expect_libdir=no
+    for flag in $LDFLAGS; do
+        AS_IF([test "$expect_libdir" = yes], [
+            SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS -L$flag"
+            expect_libdir=no
+        ], [
+            AS_CASE([$flag], [-L], [expect_libdir=yes],
+                    [-L*], [SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS $flag"])
+        ])
+    done
+])
+AC_SUBST([SMB2_PC_LIBDIRS])
 AC_SUBST([SMB2_PC_QUIC_LIBS])
 AC_SUBST([SMB2_PC_REQUIRES])
 AC_SUBST([SMB2_PC_CRYPTO_LIBS])
