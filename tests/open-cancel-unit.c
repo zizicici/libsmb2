@@ -684,8 +684,9 @@ static void sync_stat_after_failed_wait(void)
         assert(smb2 && !smb2_connect_tree_id(smb2, 1));
         assert(!smb2_connect_tree_id(smb2, 2) && !smb2_select_tree_id(smb2, 1));
         fh = smb2_fh_from_file_id(smb2, &id);
-        assert(fh);
+        assert(fh && !smb2_select_tree_id(smb2, 2));
         assert(smb2_fstat(smb2, fh, &by_handle) < 0);
+        assert(!smb2_select_tree_id(smb2, 1));
         assert(smb2_stat(smb2, "file", &by_path) < 0);
         assert(smb2_statvfs(smb2, "", &volume) < 0);
 

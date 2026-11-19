@@ -3138,6 +3138,8 @@ smb2_fstat_async(struct smb2_context *smb2, struct smb2fh *fh,
                 smb2_free_pdu(smb2, pdu);
                 return -ENOMEM;
         }
+        smb2_set_tree_id_for_pdu(smb2, pdu, file_handle_tree_id(smb2, fh));
+        smb2_set_tree_id_for_pdu(smb2, next_pdu, file_handle_tree_id(smb2, fh));
         smb2_add_unrelated_compound_pdu(smb2, pdu, next_pdu);
 
         /* attribute tag query + info query */
