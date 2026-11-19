@@ -7,7 +7,11 @@ LDADD = ../lib/libsmb2.la
 noinst_PROGRAMS = prog_ls prog_mkdir prog_rmdir prog_cat \
 	prog_cat_cancel prog_cancel_pdu prog_open_timeout prog_notify_cancel \
 	prog_lock_cancel prog_setsd prog_ssc prog_unrelated_compound
-noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit
+noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit lseek-unit
+
+noinst_PROGRAMS += sync-stat-unit
+
+noinst_PROGRAMS += set-info-unit
 
 EXTRA_PROGRAMS = ld_sockerr
 CLEANFILES = ld_sockerr.o ld_sockerr.so
@@ -23,13 +27,14 @@ ld_sockerr.o: ld_sockerr-ld_sockerr.o
 ld_sockerr.so: ld_sockerr.o
 	$(CC) -shared -o ld_sockerr.so ld_sockerr.o -ldl
 
-T = `ls test_*.sh`
+T = "$(srcdir)"/test_*.sh
 
 test: $(noinst_PROGRAMS) $(bin_SCRIPTS)
-	for TEST in $(T); do \
+	srcdir="$(srcdir)"; export srcdir; for TEST in $(T); do \
 		echo "Running $$TEST"; \
 		echo "--------------"; \
-		sh $$TEST || exit 1; \
+		case "$$TEST" in */*) ;; *) TEST="$(srcdir)/$$TEST";; esac; \
+		"$$TEST" || exit 1; \
 		echo "--------------"; \
 		echo; \
 	done

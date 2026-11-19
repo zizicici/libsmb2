@@ -361,7 +361,7 @@ void smb2_set_version(struct smb2_context *smb2,
 /*
  * Sets which version libsmb2 uses.
 */
-#define LIBSMB2_MAJOR_VERSION 4
+#define LIBSMB2_MAJOR_VERSION 7
 #define LIBSMB2_MINOR_VERSION 0
 #define LIBSMB2_PATCH_VERSION 0
 
@@ -1124,7 +1124,7 @@ int smb2_write(struct smb2_context *smb2, struct smb2fh *fh,
  * Sync lseek()
  */
 /*
- * smb2_seek() SEEK_SET and SEEK_CUR are fully supported.
+ * SEEK_SET and SEEK_CUR are fully supported. On error the position is unchanged.
  * SEEK_END only returns the end-of-file from the original open.
  * (it will not call fstat to discover the current file size and will not block)
  */
