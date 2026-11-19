@@ -25,8 +25,6 @@
 
 #include "compat.h"
 
-#include "portable-endian.h"
-
 #include "aes-armv8.h"
 
 #if !SMB2_ARMV8_AES
@@ -97,124 +95,21 @@ SMB2_ARMV8 void smb2_armv8_aes128_expand_key(const uint8_t key[16],
         }
 }
 
-/* CCM, mirroring the portable implementation in aes128ccm.c exactly. */
+typedef struct smb2_aes128_keys ccm_key;
 
-SMB2_ARMV8 static void bxory(unsigned char *b, unsigned char *y, size_t num)
+SMB2_ARMV8 static inline void ccm_encrypt_block(const ccm_key *key, uint8_t in[16], uint8_t out[16])
 {
-        int i;
-
-        for(i = 0; i < (int)num; i++) {
-                b[i] = b[i] ^ y[i];
-        }
+        vst1q_u8(out, smb2_armv8_aes128_encrypt(vld1q_u8(in), key));
 }
 
-SMB2_ARMV8 static void armv8_ccm_generate_b0(const unsigned char *nonce, size_t nlen,
-                                             size_t alen, size_t plen, size_t mlen,
-                                             unsigned char *buf)
+SMB2_ARMV8 static inline void ccm_mac_block(const ccm_key *key, const uint8_t b[16], uint8_t y[16])
 {
-        uint32_t len;
-
-        memset(buf, 0, 16);
-        if (alen) {
-                buf[0] |= 0x40;                   /* Adata */
-        }
-        buf[0] |= (((mlen - 2) / 2) << 3) & 0x38; /* M' */
-        buf[0] |= (15 - nlen - 1) & 0x07;         /* L' */
-
-        len = htobe32((uint32_t)plen);
-        memcpy(&buf[12], &len, 4);
-        memcpy(&buf[1], nonce, nlen);
+        uint8x16_t block = veorq_u8(vld1q_u8(b), vld1q_u8(y));
+        vst1q_u8(y, smb2_armv8_aes128_encrypt(block, key));
 }
 
-SMB2_ARMV8 static void armv8_ccm_generate_s(const struct smb2_aes128_keys *keys,
-                                            const unsigned char *nonce, size_t nlen,
-                                            int i, unsigned char *s)
-{
-        uint32_t l;
-
-        memset(s, 0, 16);
-        s[0] |= (15 - nlen - 1) & 0x07;
-
-        l = htobe32(i);
-        memcpy(&s[12], &l, 4);
-
-        memcpy(&s[1], nonce, nlen);
-
-        vst1q_u8(s, smb2_armv8_aes128_encrypt(vld1q_u8(s), keys));
-}
-
-SMB2_ARMV8 static void armv8_ccm_generate_T(const struct smb2_aes128_keys *keys,
-                                            const unsigned char *nonce, size_t nlen,
-                                            const unsigned char *aad, size_t alen,
-                                            unsigned char *p, size_t plen,
-                                            unsigned char *m, size_t mlen)
-{
-        unsigned char b[16], y[16];
-        uint16_t l;
-
-        armv8_ccm_generate_b0(nonce, nlen, alen, plen, mlen, &b[0]);
-        vst1q_u8(y, smb2_armv8_aes128_encrypt(vld1q_u8(b), keys));
-
-        /* Create Aad */
-        if (alen) {
-                /* First block */
-                memset(b, 0, 16);
-                l = htobe16((uint16_t)alen);
-                memcpy(b, &l, 2);
-
-                l = (alen > 14) ? 14 : (uint16_t)alen;
-                memcpy(&b[2], aad, l);
-                aad  += l;
-                alen -= l;
-
-                vst1q_u8(b, veorq_u8(vld1q_u8(b), vld1q_u8(y)));
-                vst1q_u8(y, smb2_armv8_aes128_encrypt(vld1q_u8(b), keys));
-
-                while (alen) {
-                        memset(b, 0, 16);
-                        l = (alen > 16) ? 16 : (uint16_t)alen;
-                        memcpy(b, aad, l);
-                        aad  += l;
-                        alen -= l;
-
-                        vst1q_u8(b, veorq_u8(vld1q_u8(b), vld1q_u8(y)));
-                        vst1q_u8(y, smb2_armv8_aes128_encrypt(vld1q_u8(b), keys));
-                }
-        }
-
-        /* Create Payload */
-        while (plen) {
-                memset(b, 0, 16);
-                l = (plen > 16) ? 16 : (uint16_t)plen;
-                memcpy(b, p, l);
-                p    += l;
-                plen -= l;
-
-                vst1q_u8(b, veorq_u8(vld1q_u8(b), vld1q_u8(y)));
-                vst1q_u8(y, smb2_armv8_aes128_encrypt(vld1q_u8(b), keys));
-        }
-
-        memcpy(m, y, mlen);
-}
-
-SMB2_ARMV8 static void armv8_ccm_crypt(const struct smb2_aes128_keys *keys,
-                                       const unsigned char *nonce, size_t nlen,
-                                       unsigned char *p, size_t plen)
-{
-        unsigned char s[16];
-        size_t l;
-        int j;
-
-        j = 0;
-        while (plen) {
-                l = (plen > 16) ? 16 : plen;
-                armv8_ccm_generate_s(keys, nonce, nlen, j + 1, &s[0]);
-                bxory(&p[j * 16], &s[0], l);
-
-                j++;
-                plen -= l;
-        }
-}
+#define CCM_TARGET SMB2_ARMV8
+#include "aes128ccm-private.h"
 
 SMB2_ARMV8 int aes128ccm_armv8_encrypt(unsigned char *key,
                                        unsigned char *nonce, size_t nlen,
@@ -223,17 +118,9 @@ SMB2_ARMV8 int aes128ccm_armv8_encrypt(unsigned char *key,
                                        unsigned char *m, size_t mlen)
 {
         struct smb2_aes128_keys keys;
-        unsigned char s[16];
 
         smb2_armv8_aes128_expand_key(key, &keys);
-
-        armv8_ccm_generate_T(&keys, nonce, nlen, aad, alen, p, plen, m, mlen);
-        armv8_ccm_generate_s(&keys, nonce, nlen, 0, &s[0]);
-        bxory(m, &s[0], mlen);
-
-        armv8_ccm_crypt(&keys, nonce, nlen, p, plen);
-
-        return 0;
+        return ccm_encrypt(&keys, nonce, nlen, aad, alen, p, plen, m, mlen);
 }
 
 SMB2_ARMV8 int aes128ccm_armv8_decrypt(unsigned char *key,
@@ -243,18 +130,9 @@ SMB2_ARMV8 int aes128ccm_armv8_decrypt(unsigned char *key,
                                        unsigned char *m, size_t mlen)
 {
         struct smb2_aes128_keys keys;
-        unsigned char s[16];
-        unsigned char tmp[16];
 
         smb2_armv8_aes128_expand_key(key, &keys);
-
-        armv8_ccm_crypt(&keys, nonce, nlen, p, plen);
-
-        armv8_ccm_generate_T(&keys, nonce, nlen, aad, alen, p, plen, tmp, mlen);
-        armv8_ccm_generate_s(&keys, nonce, nlen, 0, &s[0]);
-        bxory(tmp, &s[0], mlen);
-
-        return memcmp(tmp, m, mlen);
+        return ccm_decrypt(&keys, nonce, nlen, aad, alen, p, plen, m, mlen);
 }
 
 #endif /* SMB2_ARMV8_AES */
