@@ -696,11 +696,10 @@ int smb2_request_resume_key(struct smb2_context *smb2, struct smb2fh *fh,
 
         rc = cb_data->status;
         if (cb_data->ptr != NULL) {
-                if (rc == 0 && resume_key != NULL) {
+                if (resume_key != NULL) {
                         memcpy(resume_key, cb_data->ptr, sizeof(*resume_key));
                 }
                 smb2_free_data(smb2, cb_data->ptr);
-                cb_data->ptr = NULL;
         }
  out:
         free(cb_data);

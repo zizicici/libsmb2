@@ -4752,7 +4752,6 @@ smb2_server_side_copy_resume_key_cb(struct smb2_context *smb2, int status,
         int ret;
 
         if (status != 0) {
-                smb2_free_data(smb2, command_data);
                 copy_data->cb(smb2, status, NULL, copy_data->cb_data);
                 free(copy_data->chunks);
                 free(copy_data);
