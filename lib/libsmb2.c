@@ -178,7 +178,7 @@ struct smb2fh {
         uint64_t seek_generation;
         uint32_t open_tree_id;
 
-        struct file_io *io_head, *io_tail;
+        struct file_io *io_tail;
         unsigned pending_positioned;
         struct file_io *waiting_close;
         int closing;
@@ -2517,7 +2517,6 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                                 fh->offset = io->offset;
                         }
                 }
-                fh->io_head = next;
                 if (next) {
                         next->prev = NULL;
                         if (next->seek_generation == io->seek_generation) {
@@ -2629,7 +2628,7 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
         if (position) {
                 fh->pending_positioned++;
         } else {
-                fh->io_head = fh->io_tail = io;
+                fh->io_tail = io;
         }
         rc = submit_file_io(smb2, io);
         if (rc < 0) {
