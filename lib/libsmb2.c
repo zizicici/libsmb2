@@ -2578,8 +2578,7 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
                 }
         }
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
@@ -2655,8 +2654,7 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(create_data);
                 return -EIO;
         }
@@ -3591,8 +3589,7 @@ link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
         data->close_pdu = NULL;
         smb2_set_close_file_id(pdu, data->file_id);
         pdu->timeout = pdu->cleanup_timeout ? time(NULL) + pdu->cleanup_timeout : 0;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
 }
@@ -3617,8 +3614,7 @@ link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
                 data->timed = 1;
         }
         smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
-        smb2_queue_pdu(smb2, create);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, create) < 0) {
                 if (data->timed) {
                         smb2->num_timed_links--;
                 }
@@ -3688,8 +3684,7 @@ link_request_done(struct smb2_context *smb2, struct symlink_cb_data *data,
                 return;
         }
         smb2_set_tree_id_for_pdu(smb2, pdu, data->tree_id);
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
 }
