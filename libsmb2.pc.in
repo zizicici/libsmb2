@@ -11,6 +11,6 @@ Version: @VERSION@
 Requires:
 Requires.private: @SMB2_PC_REQUIRES@
 Conflicts:
-Libs: -L${libdir} -lsmb2
-Libs.private: @SMB2_PC_LIBDIRS@ @MAYBE_LIBKRB5@ @SMB2_PC_QUIC_LIBS@ @MAYBE_LIBRDMACM@ @SMB2_PC_CRYPTO_LIBS@ @LIBSOCKET@
-Cflags: -I${includedir}
+Libs: -L"${libdir}" -lsmb2
+Libs.private: @SMB2_PC_PRIVATE_LIBS@
+Cflags: -I"${includedir}"
