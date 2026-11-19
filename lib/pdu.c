@@ -1438,7 +1438,7 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
         pdu = smb2->waitqueue;
         while (pdu) {
                 if (pdu->timeout && pdu->timeout < t && !smb2_waiting_for_create_cleanup(pdu)) {
-                        if (smb2_expire_link_create(smb2, pdu)) {
+                        if (smb2_expire_sent_create(smb2, pdu)) {
                                 pdu = smb2->waitqueue;
                                 continue;
                         }

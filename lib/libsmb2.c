@@ -723,7 +723,7 @@ opendir_created(struct smb2_context *smb2, int status,
                 if (status == SMB2_STATUS_SUCCESS) {
                         close_abandoned_file(smb2, dir->tree_id, rep->file_id);
                 }
-                free_smb2dir(smb2, dir);
+                opendir_complete(smb2, dir, 0);
                 return;
         }
 
@@ -3952,23 +3952,39 @@ smb2_waiting_for_create_cleanup(const struct smb2_pdu *pdu)
         return 0;
 }
 
-/* A sent link CREATE may already own the server handle. Keep its reference
- * until the FileId arrives, and complete the application independently. */
+/* A sent CREATE may already own the server handle. Keep its reference until
+ * the FileId arrives. The application receives exactly one completion even
+ * when it releases a caller-owned PDU inside its timeout callback. */
 int
-smb2_expire_link_create(struct smb2_context *smb2, struct smb2_pdu *pdu)
+smb2_expire_sent_create(struct smb2_context *smb2, struct smb2_pdu *pdu)
 {
-        struct symlink_cb_data *data;
         smb2_command_cb cb;
         void *cb_data;
 
-        if (pdu->cb != link_open_cb) {
+        if (pdu->cb == open_cb) {
+                struct smb2fh *fh = pdu->cb_data;
+                cb = fh->cb;
+                cb_data = fh->cb_data;
+                fh->cb = NULL;
+                fh->cb_data = NULL;
+                fh->cancel_free_cb = NULL;
+        } else if (pdu->cb == opendir_cb) {
+                struct smb2dir *dir = pdu->cb_data;
+                cb = dir->cb;
+                cb_data = dir->cb_data;
+                dir->cb = NULL;
+                dir->cb_data = NULL;
+                dir->cancel_free_cb = NULL;
+        } else if (pdu->cb == link_open_cb) {
+                struct symlink_cb_data *link = pdu->cb_data;
+                cb = link->cb;
+                cb_data = link->cb_data;
+                link->cb = NULL;
+                link->cb_data = NULL;
+        } else {
                 return 0;
         }
-        data = pdu->cb_data;
-        cb = data->cb;
-        cb_data = data->cb_data;
-        data->cb = NULL;
-        data->cb_data = NULL;
+        smb2_set_nterror(smb2, SMB2_STATUS_IO_TIMEOUT, "CREATE timed out");
         cb(smb2, -ETIMEDOUT, NULL, cb_data);
         return 1;
 }

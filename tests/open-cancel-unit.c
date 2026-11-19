@@ -369,6 +369,41 @@ static void close_waiting_for_credit(struct smb2_context *smb2)
         assert(expired == 1);
 }
 
+static void late_open(struct smb2_context *smb2, int directory, int owned)
+{
+        struct smb2_create_reply created = {0};
+        struct smb2_pdu *owner = NULL;
+        int expired = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        smb2->credits = 32;
+        smb2_set_timeout(smb2, 30);
+        if (directory) {
+                if (owned) {
+                        owner = smb2_opendir_async_pdu(smb2, "", expect_timeout, &expired, NULL);
+                } else {
+                        assert(!smb2_opendir_async(smb2, "", expect_timeout, &expired));
+                }
+        } else if (owned) {
+                owner = smb2_open_async_pdu(smb2, "file", O_RDONLY, expect_timeout, &expired, NULL);
+        } else {
+                assert(!smb2_open_async(smb2, "file", O_RDONLY, expect_timeout, &expired));
+        }
+        assert(smb2->waitqueue && (!owned || owner == smb2->waitqueue));
+        smb2->waitqueue->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && expired == 1 && smb2->waitqueue);
+        if (owned == 1) {
+                smb2_free_pdu(smb2, owner);
+        }
+        reply(smb2, SMB2_CREATE, SMB2_STATUS_SUCCESS, &created);
+        if (owned == 2) {
+                smb2_free_pdu(smb2, owner);
+        }
+        reply(smb2, SMB2_CLOSE, SMB2_STATUS_SUCCESS, NULL);
+        assert(expired == 1 && !smb2->waitqueue);
+        smb2_set_timeout(smb2, 0);
+}
+
 static void directory_close_waiting_for_credit(struct smb2_context *smb2)
 {
         struct smb2_create_reply created = {0};
@@ -913,6 +948,13 @@ int main(void)
         promoted_io_timeout(smb2);
         close_waiting_for_credit(smb2);
         directory_close_waiting_for_credit(smb2);
+        for (int owned = 0; owned <= 2; owned++) {
+                char sent[4096];
+                while (recv(pair[1], sent, sizeof(sent), MSG_DONTWAIT) > 0) {
+                }
+                late_open(smb2, 0, owned);
+                late_open(smb2, 1, owned);
+        }
         deferred_io_timeout(smb2, 0);
         deferred_io_timeout(smb2, 1);
         flush_after_tree_switch(smb2);
