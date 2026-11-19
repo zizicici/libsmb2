@@ -510,6 +510,15 @@ test_queue_rejection(void)
         reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 8);
         CHECK(cb_done && cb_status == -EIO);
         queue_result = 0;
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
+        session_close(&s);
+
+        CHECK(session_open(&s, DCERPC_AUTH_LEVEL_INTEGRITY, 1, 1) == 0);
+        CHECK(session_call(&s) == 0);
+        reply(s.smb2, SMB2_STATUS_BUFFER_OVERFLOW, rep_l5_hsign, 8);
+        last_cb(s.smb2, SMB2_STATUS_IO_TIMEOUT, NULL, last_priv);
+        CHECK(cb_done == 1 && cb_status == -ETIMEDOUT);
+        CHECK(session_call(&s) == -EIO && sent_len == 0);
         session_close(&s);
 }
 #endif

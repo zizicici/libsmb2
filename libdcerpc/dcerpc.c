@@ -1306,12 +1306,14 @@ dcerpc_leave(struct dcerpc_context *dce)
 /* An incomplete exchange can leave unread pipe data and advance only one
  * side of the Schannel sequence. A fresh association is required. */
 static void
-dcerpc_fail_pipe(struct dcerpc_context *dce, const char *reason)
+dcerpc_fail_pipe(struct dcerpc_context *dce, int status, const char *reason)
 {
         dce->active++;
         dce->pipe_failed = 1;
-        dcerpc_set_error(dce, "%s. Open a new RPC association", reason);
-        dcerpc_cancel_pending(dce, -EIO);
+        if (reason) {
+                dcerpc_set_error(dce, "%s. Open a new RPC association", reason);
+        }
+        dcerpc_cancel_pending(dce, status);
         dcerpc_leave(dce);
 }
 
@@ -2865,7 +2867,17 @@ dcerpc_transport_error(int status)
 }
 
 static void
-dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
+dcerpc_abort_exchange(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
+                      int status, const char *reason)
+{
+        if (!pdu->pending.orphaned) {
+                dcerpc_fail_pipe(dce, status, reason);
+        }
+        dcerpc_free_pdu(NULL, pdu);
+}
+
+static void
+dcerpc_frag_read_cb(struct smb2_context *smb2 _U_, int status,
                     void *command_data, void *private_data)
 {
         struct dcerpc_pdu *pdu = private_data;
@@ -2883,10 +2895,8 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                 status = SMB2_STATUS_SUCCESS;
         }
         if (status != SMB2_STATUS_SUCCESS) {
-                smb2_set_error(smb2, "DCERPC fragment READ failed "
-                               "(0x%08x) %s", status, nterror_to_str(status));
-                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status),
-                                           NULL);
+                dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                      nterror_to_str(status));
                 return;
         }
 
@@ -2894,22 +2904,16 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                 nread = rep->data_length;
         }
         if (nread > DCE_FRAG_READ_SIZE) {
-                smb2_set_error(smb2, "DCERPC fragment READ returned %u "
-                               "bytes, more than the %d asked for", nread,
-                               DCE_FRAG_READ_SIZE);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EIO, "DCERPC fragment READ exceeded the buffer");
                 return;
         }
         if (nread == 0) {
-                smb2_set_error(smb2, "DCERPC fragment READ returned 0 bytes "
-                               "before LAST_FRAG");
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EIO, "DCERPC fragment READ ended before LAST_FRAG");
                 return;
         }
 
         if (dcerpc_reasm_append(pdu, pdu->frag_read_buf, nread)) {
-                smb2_set_error(smb2, "DCERPC failed to grow reassembly buffer");
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                 return;
         }
 
@@ -2956,12 +2960,12 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
         if (st == DCE_FRAG_NEED_MORE) {
                 int rc = dcerpc_read_more_frags(dce, pdu);
                 if (rc < 0) {
-                        dcerpc_send_pdu_cb_and_free(dce, pdu, rc, NULL);
+                        dcerpc_abort_exchange(dce, pdu, rc, "Could not read the rest of the RPC response");
                 }
                 return;
         }
         if (st == DCE_FRAG_ERROR) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EINVAL, NULL);
                 return;
         }
 
@@ -2972,7 +2976,7 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
 
         if ((dce->sch != NULL ? dce_unfragment_auth(dce, pdu, &iov) :
              dce_unfragment_iov(dce, pdu, &iov))) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EINVAL, NULL);
                 return;
         }
 
@@ -3073,7 +3077,12 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         }
         if (status != SMB2_STATUS_SUCCESS) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
+                if (pdu->frag_pos || dce->sch || status == SMB2_STATUS_IO_TIMEOUT) {
+                        dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                              nterror_to_str(status));
+                } else {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
+                }
                 return;
         }
 
@@ -3083,7 +3092,7 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         pdu->payload = dcerpc_mem_init(pdu->decode_size);
         if (pdu->payload == NULL) {
                 smb2_free_data(dce->smb2, rep->output);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                 return;
         }
 
@@ -3096,7 +3105,7 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         if (rep->output_count && rep->output) {
                 if (dcerpc_reasm_append(pdu, rep->output, rep->output_count)) {
                         smb2_free_data(dce->smb2, rep->output);
-                        dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                        dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                         return;
                 }
         }
@@ -3359,22 +3368,19 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
                 return;
         }
         if (status != SMB2_STATUS_SUCCESS) {
-                dcerpc_set_error(dce, "DCERPC fragment WRITE failed "
-                                 "(0x%08x) %s", status, nterror_to_str(status));
-                dcerpc_send_pdu_cb_and_free(dce, pdu,
-                                            dcerpc_transport_error(status), NULL);
+                dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                      nterror_to_str(status));
                 return;
         }
         length = dcerpc_request_frag_length(pdu);
         if (!rep || rep->count != length) {
-                dcerpc_fail_pipe(dce, "Incomplete DCERPC fragment WRITE");
-                dcerpc_free_pdu(NULL, pdu);
+                dcerpc_abort_exchange(dce, pdu, -EIO, "Incomplete DCERPC fragment WRITE");
                 return;
         }
         pdu->frag_pos += length;
         rc = dcerpc_send_request_frag(dce, pdu);
         if (rc) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, rc, NULL);
+                dcerpc_abort_exchange(dce, pdu, rc, "Could not submit the next RPC fragment");
         }
 }
 
@@ -3470,7 +3476,7 @@ dcerpc_submit_call(struct dcerpc_context *dce,
                 if (dcerpc_fragment_request_auth(dce, pdu, iov.buf, len,
                                                  max_frag)) {
                         if (pdu->frag_len) {
-                                dcerpc_fail_pipe(dce, "Could not finish signing the RPC fragments");
+                                dcerpc_fail_pipe(dce, -EIO, "Could not finish signing the RPC fragments");
                         }
                         dcerpc_free_iovec(&iov);
                         dcerpc_free_pdu(dce, pdu);
@@ -3515,7 +3521,7 @@ dcerpc_submit_call(struct dcerpc_context *dce,
                 /* Signing already consumed sequence numbers, but the peer
                  * did not receive the rejected request. */
                 if (rc && dce->sch) {
-                        dcerpc_fail_pipe(dce, "Could not submit the signed RPC request");
+                        dcerpc_fail_pipe(dce, -EIO, "Could not submit the signed RPC request");
                 }
                 dcerpc_free_pdu(dce, pdu);
                 return rc;
@@ -3594,7 +3600,7 @@ dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
                 return scb->status;
         }
 
-        dcerpc_fail_pipe(dce, "Transport wait failed with an RPC still pending");
+        dcerpc_fail_pipe(dce, -EIO, "Transport wait failed with an RPC still pending");
         return -EIO;
 }
 
