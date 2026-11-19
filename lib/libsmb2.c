@@ -2427,6 +2427,8 @@ smb2_lseek(struct smb2_context *smb2, struct smb2fh *fh,
 }
 
 struct create_cb_data {
+        char *unlink_path;
+        uint32_t unlink_tree;
         smb2_command_cb cb;
         void *cb_data;
         uint32_t status;
@@ -2441,15 +2443,33 @@ struct create_cb_data {
         int pending;
 };
 
+static int unlink_dir_link_async(struct smb2_context *smb2, const char *path,
+                                 uint32_t tree_id, smb2_command_cb cb, void *cb_data);
+
+static int
+command_error(int status)
+{
+        int err = nterror_to_errno(status);
+        return err ? -err : -EIO;
+}
+
 static void
 create_complete(struct smb2_context *smb2, struct create_cb_data *create_data)
 {
-        int status = 0;
+        int status = create_data->status ? command_error(create_data->status) : 0;
 
-        if (create_data->status != SMB2_STATUS_SUCCESS) {
-                status = -nterror_to_errno(create_data->status);
+        if (create_data->status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
+            create_data->unlink_path) {
+                status = unlink_dir_link_async(smb2, create_data->unlink_path,
+                                               create_data->unlink_tree,
+                                               create_data->cb, create_data->cb_data);
+                if (status == 0) {
+                        free(create_data->unlink_path);
+                        free(create_data);
+                        return;
+                }
         }
-
+        free(create_data->unlink_path);
         create_data->cb(smb2, status, NULL, create_data->cb_data);
         free(create_data);
 }
@@ -2468,6 +2488,9 @@ create_cb_2(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
         if (create_data->status == SMB2_STATUS_SUCCESS) {
                 create_data->status = status;
         }
@@ -2480,7 +2503,12 @@ create_cb_1(struct smb2_context *smb2, int status,
 {
         struct create_cb_data *create_data = private_data;
 
-        if (status != SMB2_STATUS_SUCCESS) {
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (status != SMB2_STATUS_SUCCESS &&
+            !((uint32_t)status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
+              create_data->unlink_path)) {
                 smb2_set_nterror(smb2, status, "Create failed with status %s.",
                                  nterror_to_str(status));
         }
@@ -2526,14 +2554,13 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         cr_req.share_access = SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE |
                 SMB2_FILE_SHARE_DELETE;
         cr_req.create_disposition = SMB2_FILE_OPEN;
-        /*
-         * Open the reparse point itself rather than following it, so that
-         * unlink() removes a symlink instead of what it points at, the
-         * way posix unlink() does. This is ignored for files that are not
-         * reparse points.
-         */
+        /* Ordinary files and rmdir finish in a single round trip. A directory
+         * rejected by unlink is reopened without DELETE_ON_CLOSE and its
+         * reparse tag is checked on the handle before it can be deleted. */
         cr_req.create_options = SMB2_FILE_DELETE_ON_CLOSE |
-                SMB2_FILE_OPEN_REPARSE_POINT;
+                SMB2_FILE_OPEN_REPARSE_POINT |
+                (is_dir ? SMB2_FILE_DIRECTORY_FILE
+                        : SMB2_FILE_NON_DIRECTORY_FILE);
         cr_req.name = path;
 
         pdu = smb2_cmd_create_async(smb2, &cr_req, create_cb_1, create_data);
@@ -2556,9 +2583,18 @@ smb2_unlink_internal(struct smb2_context *smb2, const char *path,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
+        if (!is_dir) {
+                create_data->unlink_tree = pdu->header.sync.tree_id;
+                create_data->unlink_path = strdup(path ? path : "");
+                if (create_data->unlink_path == NULL) {
+                        smb2_free_pdu(smb2, pdu);
+                        free(create_data);
+                        return -ENOMEM;
+                }
+        }
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
+                free(create_data->unlink_path);
                 free(create_data);
                 return -EIO;
         }
@@ -2633,8 +2669,7 @@ smb2_mkdir_async(struct smb2_context *smb2, const char *path,
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
         create_data->pending = 2;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
                 free(create_data);
                 return -EIO;
         }
@@ -3509,140 +3544,308 @@ smb2_ftruncate_async(struct smb2_context *smb2, struct smb2fh *fh,
 struct symlink_cb_data {
         smb2_command_cb cb;
         void *cb_data;
-
         uint32_t status;
-        /*
-         * The reparse buffer we hand to the ioctl is not owned by the pdu,
-         * so we have to keep it alive until the whole compound is done.
-         */
+        uint32_t tree_id;
+        smb2_file_id file_id;
         uint8_t *reparse;
-        /*
-         * If we managed to create the placeholder but then failed to turn
-         * it into a symlink we have to remove it again, so remember the
-         * path and the error that made us give up.
-         */
-        int created;
-        int is_dir;
-        char *linkpath;
-        char *error;
-        /*
-         * Number of compound PDUs that still hold a pointer to this
-         * structure; see create_cb_data.pending for the discipline. The
-         * failure-path cleanup unlink holds one reference too.
-         */
+        struct smb2_pdu *close_pdu;
+        int opened;
+        int delete_on_close;
+        int timed;
+        /* Both compound replies must arrive before the handle is disposed. */
         int pending;
 };
 
-static void symlink_cleanup_cb(struct smb2_context *smb2, int status,
-                               void *command_data, void *private_data);
-
 static void
-free_symlink_data(struct symlink_cb_data *cb_data)
+free_symlink_data(struct symlink_cb_data *data)
 {
-        free(cb_data->error);
-        free(cb_data->linkpath);
-        free(cb_data->reparse);
-        free(cb_data);
+        free(data->reparse);
+        free(data);
 }
 
 static void
-symlink_finish(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
+link_finish(struct smb2_context *smb2, struct symlink_cb_data *data,
+            uint32_t status)
 {
-        /* The cleanup unlink will have overwritten the error that
-         * actually made us fail, so put it back. */
-        if (cb_data->error) {
-                smb2_set_error(smb2, "%s", cb_data->error);
+        if (data->status != SMB2_STATUS_SUCCESS) {
+                status = data->status;
         }
-        cb_data->cb(smb2, -nterror_to_errno(cb_data->status),
-                    NULL, cb_data->cb_data);
-        free_symlink_data(cb_data);
+        if (data->cb && status != SMB2_STATUS_SUCCESS) {
+                smb2_set_nterror(smb2, status, "Link operation failed: %s",
+                                 nterror_to_str(status));
+        }
+        if (data->close_pdu) {
+                smb2_free_pdu(smb2, data->close_pdu);
+        }
+        if (data->timed) {
+                smb2->num_timed_links--;
+        }
+        if (data->cb) {
+                data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
+        }
+        free_symlink_data(data);
 }
 
 static void
-symlink_complete(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
+link_close_cb(struct smb2_context *smb2, int status,
+              void *command_data _U_, void *private_data)
 {
-        if (cb_data->status != SMB2_STATUS_SUCCESS && cb_data->created) {
-                /*
-                 * We created the placeholder but never got to turn it into
-                 * a symlink. Do not leave an empty file or directory
-                 * behind. Transfer our reference to the cleanup unlink;
-                 * its completion callback drops it again.
-                 */
-                cb_data->error = strdup(smb2_get_error(smb2));
-                cb_data->created = 0;
-                cb_data->pending = 1;
-                if (smb2_unlink_internal(smb2, cb_data->linkpath,
-                                         cb_data->is_dir,
-                                         symlink_cleanup_cb, cb_data) == 0) {
-                        return;
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        link_finish(smb2, private_data, status);
+}
+
+static void
+link_close(struct smb2_context *smb2, struct symlink_cb_data *data)
+{
+        struct smb2_pdu *pdu = data->close_pdu;
+
+        data->close_pdu = NULL;
+        smb2_set_close_file_id(pdu, data->file_id);
+        pdu->timeout = pdu->cleanup_timeout ? time(NULL) + pdu->cleanup_timeout : 0;
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
+                link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
+        }
+}
+
+/* Reserve CLOSE before CREATE can acquire a remote handle. */
+static int
+link_submit(struct smb2_context *smb2, struct symlink_cb_data *data,
+            struct smb2_pdu *create)
+{
+        struct smb2_close_request req = {0};
+
+        data->close_pdu = smb2_cmd_close_async(smb2, &req, link_close_cb, data);
+        if (!data->close_pdu) {
+                smb2_free_pdu(smb2, create);
+                free_symlink_data(data);
+                return -ENOMEM;
+        }
+        if (create->timeout) {
+                create->cleanup_timeout = smb2->timeout > 0 ? smb2->timeout : 1;
+                data->close_pdu->cleanup_timeout = create->cleanup_timeout;
+                smb2->num_timed_links++;
+                data->timed = 1;
+        }
+        smb2_set_tree_id_for_pdu(smb2, data->close_pdu, data->tree_id);
+        if (smb2_queue_pdu_final(smb2, create) < 0) {
+                if (data->timed) {
+                        smb2->num_timed_links--;
                 }
-                cb_data->pending = 0;
+                smb2_free_pdu(smb2, data->close_pdu);
+                free_symlink_data(data);
+                return -EIO;
         }
-
-        symlink_finish(smb2, cb_data);
+        return 0;
 }
 
 static void
-symlink_unref(struct smb2_context *smb2, struct symlink_cb_data *cb_data)
+link_disposition_cb(struct smb2_context *smb2, int status,
+                    void *command_data _U_, void *private_data)
 {
-        if (--cb_data->pending == 0) {
-                symlink_complete(smb2, cb_data);
+        struct symlink_cb_data *data = private_data;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if ((uint32_t)status == SMB2_STATUS_SHUTDOWN) {
+                link_finish(smb2, data, status);
+                return;
+        }
+        if (data->status == SMB2_STATUS_SUCCESS) {
+                data->status = status;
+        }
+        link_close(smb2, data);
+}
+
+static void
+link_request_done(struct smb2_context *smb2, struct symlink_cb_data *data,
+                  uint32_t status)
+{
+        struct smb2_file_disposition_info disposition = {1};
+        struct smb2_set_info_request req = {0};
+        struct smb2_pdu *pdu;
+
+        if (data->status == SMB2_STATUS_SUCCESS) {
+                data->status = status;
+        }
+        if (status == SMB2_STATUS_SHUTDOWN) {
+                data->opened = 0;
+        }
+        if (--data->pending != 0) {
+                return;
+        }
+        if (!data->opened || data->status == SMB2_STATUS_SHUTDOWN) {
+                link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
+                return;
+        }
+        if (!data->delete_on_close) {
+                link_close(smb2, data);
+                return;
+        }
+
+        /* Mark the original handle before closing it, even if another client
+         * renamed the object or reused the original path. */
+        req.info_type = SMB2_0_INFO_FILE;
+        req.file_info_class = SMB2_FILE_DISPOSITION_INFORMATION;
+        req.input_data = &disposition;
+        req.buffer_length = 1;
+        req.buffer_offset = SMB2_HEADER_SIZE + 32;
+        memcpy(req.file_id, data->file_id, SMB2_FD_SIZE);
+        pdu = smb2_cmd_set_info_async(smb2, &req, link_disposition_cb, data);
+        if (pdu == NULL) {
+                link_disposition_cb(smb2, SMB2_STATUS_NO_MEMORY, NULL, data);
+                return;
+        }
+        smb2_set_tree_id_for_pdu(smb2, pdu, data->tree_id);
+        if (smb2_queue_pdu_final(smb2, pdu) < 0) {
+                link_finish(smb2, data, SMB2_STATUS_SHUTDOWN);
         }
 }
 
 static void
-symlink_cleanup_cb(struct smb2_context *smb2, int status _U_,
-                   void *command_data _U_, void *private_data)
+link_open_cb(struct smb2_context *smb2, int status,
+             void *command_data, void *private_data)
 {
-        /* Whether or not we managed to remove the placeholder again, the
-         * error we report is the one that made the symlink fail. */
-        symlink_unref(smb2, private_data);
+        struct symlink_cb_data *data = private_data;
+        struct smb2_create_reply *rep = command_data;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (status == SMB2_STATUS_SUCCESS) {
+                memcpy(data->file_id, rep->file_id, SMB2_FD_SIZE);
+                data->opened = 1;
+        }
+        link_request_done(smb2, data, status);
+}
+
+/* An accepted CREATE can still return a FileId after the caller times out.
+ * Keep it, or a CLOSE waiting for send credits, for one cleanup interval. */
+int
+smb2_expire_link_request(struct smb2_context *smb2, struct smb2_pdu *pdu,
+                         int sent, time_t now)
+{
+        struct symlink_cb_data *data;
+        smb2_command_cb cb;
+        void *private_data;
+
+        if (pdu->cleanup_pending) {
+                smb2_set_error(smb2, "Timed out waiting for link handle cleanup");
+                smb2_close_context(smb2);
+                return -1;
+        }
+        if (!pdu->cleanup_timeout ||
+            (sent ? pdu->cb != link_open_cb : pdu->cb != link_close_cb)) {
+                return 0;
+        }
+        pdu->cleanup_pending = 1;
+        pdu->timeout = now + pdu->cleanup_timeout;
+        data = pdu->cb_data;
+        cb = data->cb;
+        private_data = data->cb_data;
+        data->cb = NULL;
+        data->cb_data = NULL;
+        if (cb) {
+                smb2_set_nterror(smb2, SMB2_STATUS_IO_TIMEOUT, "Link operation timed out");
+                cb(smb2, -ETIMEDOUT, NULL, private_data);
+        }
+        return 1;
 }
 
 static void
-symlink_cb_1(struct smb2_context *smb2, int status,
-             void *command_data _U_, void *private_data)
+symlink_ioctl_cb(struct smb2_context *smb2, int status,
+                 void *command_data _U_, void *private_data)
 {
-        struct symlink_cb_data *cb_data = private_data;
+        struct symlink_cb_data *data = private_data;
 
-        if (status != SMB2_STATUS_SUCCESS) {
-                smb2_set_nterror(smb2, status, "%s", nterror_to_str(status));
-        } else {
-                cb_data->created = 1;
+        if (status == SMB2_STATUS_PENDING) {
+                return;
         }
-        if (cb_data->status == SMB2_STATUS_SUCCESS) {
-                cb_data->status = status;
-        }
-        symlink_unref(smb2, cb_data);
+        /* Clean up the placeholder if converting it into a link failed. */
+        data->delete_on_close = status != SMB2_STATUS_SUCCESS;
+        link_request_done(smb2, data, status);
 }
 
 static void
-symlink_cb_2(struct smb2_context *smb2, int status,
-             void *command_data _U_, void *private_data)
+unlink_dir_tag_cb(struct smb2_context *smb2, int status,
+                  void *command_data, void *private_data)
 {
-        struct symlink_cb_data *cb_data = private_data;
+        struct symlink_cb_data *data = private_data;
+        struct smb2_query_info_reply *rep = command_data;
+        struct smb2_file_attribute_tag_info *tag;
+        struct smb2_stat_64 st;
 
-        if (status != SMB2_STATUS_SUCCESS &&
-            cb_data->status == SMB2_STATUS_SUCCESS) {
-                smb2_set_nterror(smb2, status, "Failed to set the reparse "
-                                 "point: %s", nterror_to_str(status));
+        if (status == SMB2_STATUS_PENDING) {
+                return;
         }
-        if (cb_data->status == SMB2_STATUS_SUCCESS) {
-                cb_data->status = status;
+        if (status == SMB2_STATUS_SUCCESS) {
+                tag = rep->output_buffer;
+                if (tag == NULL) {
+                        status = SMB2_STATUS_DATA_ERROR;
+                } else {
+                        smb2_set_stat_type(&st, tag->file_attributes, tag->reparse_tag);
+                        if (st.smb2_type == SMB2_TYPE_LINK && tag->reparse_tag != 0) {
+                                data->delete_on_close = data->cb != NULL;
+                        } else {
+                                status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
+                        }
+                        smb2_free_data(smb2, tag);
+                }
+        } else if (status == SMB2_STATUS_NOT_SUPPORTED ||
+                   status == SMB2_STATUS_INVALID_INFO_CLASS ||
+                   status == SMB2_STATUS_NOT_IMPLEMENTED) {
+                /* The first CREATE already identified a directory. */
+                status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
         }
-        symlink_unref(smb2, cb_data);
+        link_request_done(smb2, data, status);
 }
 
-static void
-symlink_cb_3(struct smb2_context *smb2, int status,
-             void *command_data _U_, void *private_data)
+static int
+unlink_dir_link_async(struct smb2_context *smb2, const char *path,
+                      uint32_t tree_id, smb2_command_cb cb, void *cb_data)
 {
-        struct symlink_cb_data *cb_data = private_data;
+        struct symlink_cb_data *data;
+        struct smb2_create_request cr_req = {0};
+        struct smb2_query_info_request qi_req = {0};
+        struct smb2_pdu *pdu, *query;
 
-        if (cb_data->status == SMB2_STATUS_SUCCESS) {
-                cb_data->status = status;
+        data = calloc(1, sizeof(*data));
+        if (data == NULL) {
+                return -ENOMEM;
         }
-        symlink_unref(smb2, cb_data);
+        data->cb = cb;
+        data->cb_data = cb_data;
+        data->tree_id = tree_id;
+        data->pending = 2;
+
+        cr_req.impersonation_level = SMB2_IMPERSONATION_IMPERSONATION;
+        cr_req.desired_access = SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES;
+        /* Keep the tag stable until the disposition request completes. */
+        cr_req.share_access = SMB2_FILE_SHARE_READ;
+        cr_req.create_disposition = SMB2_FILE_OPEN;
+        cr_req.create_options = SMB2_FILE_DIRECTORY_FILE | SMB2_FILE_OPEN_REPARSE_POINT;
+        cr_req.name = path;
+        pdu = smb2_cmd_create_async(smb2, &cr_req, link_open_cb, data);
+        if (pdu == NULL) {
+                free(data);
+                return -ENOMEM;
+        }
+        qi_req.info_type = SMB2_0_INFO_FILE;
+        qi_req.file_info_class = SMB2_FILE_ATTRIBUTE_TAG_INFORMATION;
+        qi_req.output_buffer_length = 8;
+        memcpy(qi_req.file_id, compound_file_id, SMB2_FD_SIZE);
+        query = smb2_cmd_query_info_async(smb2, &qi_req, unlink_dir_tag_cb, data);
+        if (query == NULL) {
+                smb2_free_pdu(smb2, pdu);
+                free(data);
+                return -ENOMEM;
+        }
+        smb2_set_tree_id_for_pdu(smb2, pdu, tree_id);
+        smb2_set_tree_id_for_pdu(smb2, query, tree_id);
+        smb2_add_compound_pdu(smb2, pdu, query);
+        return link_submit(smb2, data, pdu);
 }
 
 /*
@@ -3673,7 +3876,6 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         struct symlink_cb_data *symlink_data;
         struct smb2_create_request cr_req;
         struct smb2_ioctl_request io_req;
-        struct smb2_close_request cl_req;
         struct smb2_reparse_data_buffer rp;
         struct smb2_iovec vec;
         struct smb2_pdu *pdu, *next_pdu;
@@ -3698,14 +3900,6 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         }
         symlink_data->cb = cb;
         symlink_data->cb_data = cb_data;
-        symlink_data->is_dir = !!(flags & SMB2_SYMLINK_DIRECTORY);
-        symlink_data->linkpath = strdup(linkpath);
-        if (symlink_data->linkpath == NULL) {
-                smb2_set_error(smb2, "Failed to allocate linkpath");
-                free_symlink_data(symlink_data);
-                return -ENOMEM;
-        }
-
         /* The print name is the target the way a user would write it. */
         printname = strdup(target);
         if (printname == NULL) {
@@ -3727,7 +3921,18 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
          * target has to be given as an object manager path.
          */
         if (absolute) {
-                subname = malloc(strlen(printname) + 5);
+                const char *prefix = "\\??\\";
+                const char *tail = printname;
+                size_t size;
+
+                if (!strncmp(tail, "\\\\?\\", 4) || !strncmp(tail, "\\\\.\\", 4)) {
+                        tail += 4;
+                } else if (!strncmp(tail, "\\\\", 2)) {
+                        prefix = "\\??\\UNC\\";
+                        tail += 2;
+                }
+                size = strlen(prefix) + strlen(tail) + 1;
+                subname = malloc(size);
                 if (subname == NULL) {
                         smb2_set_error(smb2, "Failed to allocate "
                                        "substitute name");
@@ -3735,7 +3940,7 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
                         free_symlink_data(symlink_data);
                         return -ENOMEM;
                 }
-                sprintf(subname, "\\??\\%s", printname);
+                snprintf(subname, size, "%s%s", prefix, tail);
         } else {
                 subname = strdup(printname);
                 if (subname == NULL) {
@@ -3794,7 +3999,7 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
                  SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE);
         cr_req.name = linkpath;
 
-        pdu = smb2_cmd_create_async(smb2, &cr_req, symlink_cb_1, symlink_data);
+        pdu = smb2_cmd_create_async(smb2, &cr_req, link_open_cb, symlink_data);
         if (pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create create command");
                 free_symlink_data(symlink_data);
@@ -3809,7 +4014,7 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         io_req.input = symlink_data->reparse;
         io_req.flags = SMB2_0_IOCTL_IS_FSCTL;
 
-        next_pdu = smb2_cmd_ioctl_async(smb2, &io_req, symlink_cb_2,
+        next_pdu = smb2_cmd_ioctl_async(smb2, &io_req, symlink_ioctl_cb,
                                         symlink_data);
         if (next_pdu == NULL) {
                 smb2_set_error(smb2, "Failed to create ioctl command");
@@ -3819,30 +4024,10 @@ smb2_symlink_async(struct smb2_context *smb2, const char *target,
         }
         smb2_add_compound_pdu(smb2, pdu, next_pdu);
 
-        /* CLOSE command */
-        memset(&cl_req, 0, sizeof(struct smb2_close_request));
-        cl_req.flags = SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB;
-        memcpy(cl_req.file_id, compound_file_id, SMB2_FD_SIZE);
-
-        next_pdu = smb2_cmd_close_async(smb2, &cl_req, symlink_cb_3,
-                                        symlink_data);
-        if (next_pdu == NULL) {
-                smb2_set_error(smb2, "Failed to create close command");
-                smb2_free_pdu(smb2, pdu);
-                free_symlink_data(symlink_data);
-                return -EINVAL;
-        }
-        smb2_add_compound_pdu(smb2, pdu, next_pdu);
-
-        /* create + ioctl + close */
-        symlink_data->pending = 3;
-        smb2_queue_pdu(smb2, pdu);
-        if (smb2->queue_rejected) {
-                free_symlink_data(symlink_data);
-                return -EIO;
-        }
-
-        return 0;
+        /* Keep the created handle open until the IOCTL result is known. */
+        symlink_data->tree_id = pdu->header.sync.tree_id;
+        symlink_data->pending = 2;
+        return link_submit(smb2, symlink_data, pdu);
 }
 
 struct readlink_cb_data {
@@ -6338,7 +6523,7 @@ int smb2_serve_port(struct smb2_server *server, const int max_connections, smb2_
                                         smb2_set_error(smb2, "Timeout expired and no connection exists");
                                         smb2_close_context(smb2);
                                 }
-                                if (smb2->timeout) {
+                                if (smb2->timeout || smb2->num_timed_links) {
                                         smb2_timeout_pdus(smb2);
                                 }
                         }

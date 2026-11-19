@@ -36,6 +36,7 @@
 #endif
 
 #ifdef HAVE_STRING_H
+#include <errno.h>
 #include <string.h>
 #endif
 
@@ -704,8 +705,8 @@ smb2_correlate_reply(struct smb2_context *smb2, struct smb2_pdu *pdu)
         return ret;
 }
 
-void
-smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+static int
+queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pending)
 {
         struct smb2_pdu *p;
         uint64_t prev_compound_mid = 0;
@@ -717,6 +718,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
 
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
+                p->report_pending = report_pending;
                 if (smb2_is_server(smb2)) {
                         /* set reply flag, servers will only reply */
                         pdu->header.flags |= SMB2_FLAGS_SERVER_TO_REDIR;
@@ -732,7 +734,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         if (!pdu->header.message_id && pdu->header.command != SMB2_NEGOTIATE) {
                                 smb2_set_error(smb2, "Queued pdu has no message id");
                                 smb2_free_pdu(smb2, pdu);
-                                return;
+                                return -EINVAL;
                         }
 
                         smb2_correlate_reply(smb2, p);
@@ -790,7 +792,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         if (!pdu->caller_frees_pdu) {
                                 smb2_free_pdu(smb2, pdu);
                         }
-                        return;
+                        return -EIO;
                 }
                 smb2->in_queue_abort = 1;
                 for (p = pdu; p; p = p->next_compound) {
@@ -807,7 +809,7 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
                         smb2_free_pdu(smb2, pdu);
                 }
                 smb2_close_context(smb2);
-                return;
+                return 0;
         }
 
         /*
@@ -823,6 +825,21 @@ smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 
         smb2_add_to_outqueue(smb2, pdu);
+        return 0;
+}
+
+/* High-level operations complete on the final reply. Raw applications may
+ * opt into interim STATUS_PENDING callbacks through passthrough mode. */
+int
+smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        return queue_pdu(smb2, pdu, 0);
+}
+
+void
+smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        (void)queue_pdu(smb2, pdu, 1);
 }
 
 struct smb2_pdu *
@@ -1275,7 +1292,7 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 }
 
-void smb2_timeout_pdus(struct smb2_context *smb2)
+int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu, *next;
         time_t t = time(NULL);
@@ -1286,6 +1303,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 if (pdu->timeout && pdu->timeout < t) {
                         struct smb2_pdu *p;
 
+                        int rc = smb2_expire_link_request(smb2, pdu, 0, t);
+                        if (rc) {
+                                /* The callback may have changed either queue. */
+                                return rc < 0 ? -1 : 0;
+                        }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         /*
                          * An unsent compound is still chained: like
@@ -1317,6 +1339,11 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
         while (pdu) {
                 next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
+                        int rc = smb2_expire_link_request(smb2, pdu, 1, t);
+                        if (rc) {
+                                /* The callback may have changed either queue. */
+                                return rc < 0 ? -1 : 0;
+                        }
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
                         if (pdu->cb) {
                                 pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
@@ -1328,5 +1355,5 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 }
                 pdu = next;
         }
+        return 0;
 }
-

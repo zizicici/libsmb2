@@ -20,7 +20,7 @@ int fail_poll(struct pollfd *fds _U_, nfds_t n _U_, int timeout _U_)
         return -1;
 }
 
-void unexpected_timeout(struct smb2_context *smb2 _U_)
+int unexpected_timeout(struct smb2_context *smb2 _U_)
 {
         abort();
 }

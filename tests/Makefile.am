@@ -11,7 +11,7 @@ noinst_PROGRAMS += metastat-0202-censored utf8-unit timestamps-unit lseek-unit
 
 noinst_PROGRAMS += sync-stat-unit
 
-noinst_PROGRAMS += set-info-unit
+noinst_PROGRAMS += set-info-unit link-handle-unit
 
 noinst_PROGRAMS += io-limits-unit
 noinst_PROGRAMS += entropy-unit iop-entropy-unit
