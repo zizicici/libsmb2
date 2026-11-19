@@ -30,6 +30,16 @@ AC_ARG_WITH([libkrb5],
                             [Do not link with libkrb5 and use builtin
                              NTLMSSP module for authentication instead.])])
 
+dnl  Native Windows SDKs normally provide Winsock and CNG but no GSSAPI.
+dnl  Honour an explicit --with-libkrb5 and use it by default if installed.
+case $host in
+  *mingw* | *wince*)
+    AS_IF([test -z "$with_libkrb5"], [
+        AC_CHECK_HEADER([gssapi/gssapi.h], [], [with_libkrb5=no])
+    ])
+    ;;
+esac
+
 AS_IF([test "x$with_libkrb5" != "xno"], [
     AC_DEFINE([HAVE_LIBKRB5], [1], [Whether we use gssapi_krb5 or not])
     AC_MSG_NOTICE([Build with gssapi_krb5 support])
@@ -106,17 +116,46 @@ SYS=
 
 case $host in
   *solaris*)
+    LIBSOCKET="-lsocket -lnsl"
     AC_CHECK_LIB([socket], [main], , [AC_MSG_ERROR([Can not find required library])])
     AC_CHECK_LIB([nsl],    [main], , [AC_MSG_ERROR([Can not find required library])])
     ;;
   *mingw32* | *cygwin* | *wince* | *mingwce*)
     LIBSOCKET='-lws2_32'
+    case $host in
+      *mingw32*)
+        AC_DEFINE([WIN32_LEAN_AND_MEAN], [1], [Avoid including winsock.h before winsock2.h])
+        AC_DEFINE([NEED_GETLOGIN_R], [1], [Provide getlogin_r on Windows])
+        dnl  The 32-bit import name includes the stdcall argument size.
+        dnl  Compile against the SDK prototype instead of AC_CHECK_LIB's
+        dnl  argument-less declaration.
+        LIBSOCKET="$LIBSOCKET -lbcrypt"
+        smb2_saved_LIBS=$LIBS
+        LIBS="$LIBSOCKET $LIBS"
+        AC_MSG_CHECKING([for Windows CNG BCryptGenRandom])
+        AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+#include <windows.h>
+#include <bcrypt.h>
+        ]], [[
+          UCHAR byte;
+          return BCryptGenRandom(NULL, &byte, sizeof(byte),
+                                 BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        ]])], [AC_MSG_RESULT([yes])],
+              [AC_MSG_FAILURE([Windows CNG (bcrypt) is required])])
+        LIBS=$smb2_saved_LIBS
+        ;;
+    esac
     SYS=mingw32
     ;;
   *)
     ;;
 esac
 AM_CONDITIONAL([HAVE_WIN32], [test "${SYS}" = "mingw32"])
+case $host in
+  *mingw* | *wince*) build_posix_utils=no ;;
+  *) build_posix_utils=yes ;;
+esac
+AM_CONDITIONAL([BUILD_POSIX_UTILS], [test "$build_posix_utils" = yes])
 dnl  libdcerpc (full DCE/RPC) is a separate project in the libdcerpc/
 dnl  subdirectory with its own configure, version and releases. It is
 dnl  Linux and FreeBSD only for now, and can never be built on Windows since its
@@ -224,10 +263,60 @@ AS_IF([test "x$with_openssl" = "xyes"], [
 ], [
     AC_MSG_NOTICE([Build WITHOUT OpenSSL])
 ])
+SMB2_PC_REQUIRES=""
+SMB2_PC_CRYPTO_LIBS="$MAYBE_LIBCRYPTO"
+AS_IF([test -n "$MAYBE_LIBCRYPTO$MAYBE_LIBQUIC$MAYBE_LIBKRB5$MAYBE_LIBRDMACM"], [
+    AC_PATH_TOOL([PKG_CONFIG], [pkg-config])
+])
+AS_CASE([$MAYBE_LIBKRB5], [*gssapi_krb5*], [
+    for module in mit-krb5-gssapi krb5-gssapi; do
+        AS_IF([test -n "$PKG_CONFIG"], [
+            AS_CASE([`"$PKG_CONFIG" --libs-only-l "$module" 2>/dev/null`], [*-lgssapi_krb5*], [
+                SMB2_PC_REQUIRES="$module"
+                break
+            ])
+        ])
+    done
+])
+AS_IF([test -n "$MAYBE_LIBCRYPTO"], [
+    AS_IF([test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists 'libcrypto >= 3'], [
+        SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }libcrypto >= 3"
+        SMB2_PC_CRYPTO_LIBS=""
+    ])
+])
+SMB2_PC_QUIC_LIBS="$MAYBE_LIBQUIC"
+AS_IF([test -n "$MAYBE_LIBQUIC" && test -n "$PKG_CONFIG" && "$PKG_CONFIG" --exists gnutls], [
+    SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }gnutls"
+    SMB2_PC_QUIC_LIBS="-lquic"
+])
+AS_IF([test -n "$MAYBE_LIBRDMACM" && test -n "$PKG_CONFIG"], [
+    for module in librdmacm libibverbs; do
+        AS_IF(["$PKG_CONFIG" --exists "$module"], [
+            SMB2_PC_REQUIRES="${SMB2_PC_REQUIRES}${SMB2_PC_REQUIRES:+, }$module"
+        ])
+    done
+])
+dnl Preserve search paths for private libraries not supplied by a .pc file.
+SMB2_PC_LIBDIRS=""
+AS_IF([test -n "$SMB2_PC_QUIC_LIBS$MAYBE_LIBRDMACM$SMB2_PC_CRYPTO_LIBS$MAYBE_LIBKRB5"], [
+    expect_libdir=no
+    for flag in $LDFLAGS; do
+        AS_IF([test "$expect_libdir" = yes], [
+            SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS -L$flag"
+            expect_libdir=no
+        ], [
+            AS_CASE([$flag], [-L], [expect_libdir=yes],
+                    [-L*], [SMB2_PC_LIBDIRS="$SMB2_PC_LIBDIRS $flag"])
+        ])
+    done
+])
+AC_SUBST([SMB2_PC_PRIVATE_LIBS], ["$SMB2_PC_LIBDIRS $MAYBE_LIBKRB5 $SMB2_PC_QUIC_LIBS $MAYBE_LIBRDMACM $SMB2_PC_CRYPTO_LIBS $LIBSOCKET"])
+AC_SUBST([SMB2_PC_REQUIRES])
 AC_SUBST([MAYBE_LIBCRYPTO])
 AC_SUBST([LIBSOCKET])
 
-AC_CHECK_LIB([dl], [dlsym], [], [AC_MSG_ERROR([dlsym not found, libdl is required])])
+dnl  Some of the Unix test helpers use dlsym. The core has no libdl dependency.
+AC_SEARCH_LIBS([dlsym], [dl])
 
 dnl  CommonCrypto.framework is not always reachable on Apple platforms
 dnl  (e.g. a toolchain that doesn't see Apple's framework headers at
@@ -300,7 +389,7 @@ dnl  Check for a cryptographically strong source of random bytes.
 dnl  The NTLMv2 client challenge, the SMB 3.1.1 preauth salt and the
 dnl  AES-CCM nonce all need to be unpredictable. Not every platform we
 dnl  build for has such a source, so all of these are optional and
-dnl  smb2_random_bytes() falls back to random() when none is present.
+dnl  applications on other ports can register a cryptographic random provider.
 AC_CHECK_HEADERS([sys/random.h])
 AC_CHECK_FUNCS([arc4random_buf getrandom])
 

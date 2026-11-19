@@ -25,13 +25,16 @@ extern "C" {
 
 #if defined(_XBOX) || defined(_WINDOWS) || defined(__MINGW32__)
 #if defined(_WINDOWS) || defined(__MINGW32__)
-#include <windows.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN 1
+#endif
 #ifdef __USE_WINSOCK__
 #include <winsock.h>
 #else
-#include <ws2tcpip.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
+#include <windows.h>
 #elif defined(_XBOX)
 #include <xtl.h>
 #include <winsockx.h>
@@ -59,10 +62,6 @@ typedef int t_socket;
 #ifdef __USE_WINSOCK__
 #include <io.h>
 #endif
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif /* !WIN32_LEAN_AND_MEAN */
 
 #ifdef XBOX_PLATFORM /* Xbox XDK Doesn´t have stdint.h header */
 typedef char int8_t;
@@ -245,7 +244,7 @@ ssize_t readv(t_socket fd, const struct iovec* vector, int count);
 
 #else
 
-inline int writev(t_socket sock, struct iovec *iov, int nvecs)
+static inline int writev(t_socket sock, struct iovec *iov, int nvecs)
 {
   DWORD ret;
 
@@ -257,7 +256,7 @@ inline int writev(t_socket sock, struct iovec *iov, int nvecs)
   return -1;
 }
 
-inline int readv(t_socket sock, struct iovec *iov, int nvecs)
+static inline int readv(t_socket sock, struct iovec *iov, int nvecs)
 {
   DWORD ret;
   DWORD flags = 0;
@@ -277,14 +276,13 @@ inline int readv(t_socket sock, struct iovec *iov, int nvecs)
 #define close closesocket
 #endif
 
-void srandom(unsigned int seed);
-int random(void);
-
 int getlogin_r(char *buf, size_t size);
 
-int getpid();
+int getpid(void);
 
-#pragma warning( disable : 4090 ) 
+#ifdef _MSC_VER
+#pragma warning(disable : 4090)
+#endif
 
 #define strdup _strdup
 
@@ -325,6 +323,11 @@ ssize_t readv(t_socket fd, const struct iovec *iov, int iovcnt);
 int getlogin_r(char *buf, size_t size);
 
 #endif /* __DREAMCAST__ */
+
+#ifdef __amigaos4__
+#include <stddef.h>
+int smb2_amiga_random_bytes(void *buf, size_t len);
+#endif
 
 #if defined(__amigaos4__) || defined(__AMIGA__) || defined(__AROS__)
 
@@ -463,15 +466,13 @@ int gethostname(char *name, size_t len);
 #ifdef _IOP
 char *strdup(const char *s);
 
-int random(void);
-void srandom(unsigned int seed);
 time_t time(time_t *tloc);
 int asprintf(char **strp, const char *fmt, ...);
 #endif
 int getlogin_r(char *buf, size_t size);
 
 #ifdef _IOP
-int getpid();
+int getpid(void);
 #define close(x) lwip_close(x)
 #define snprintf(format, n, ...) sprintf(format, __VA_ARGS__)
 #define fcntl(a,b,c) lwip_fcntl(a,b,c)
@@ -559,8 +560,6 @@ ssize_t readv(t_socket fd, const struct iovec *iov, int iovcnt);
 #include <net/poll.h>
 
 int getlogin_r(char *buf, size_t size);
-void srandom(unsigned int seed);
-int random(void);
 #define getaddrinfo smb2_getaddrinfo
 #define freeaddrinfo smb2_freeaddrinfo
 
@@ -832,8 +831,6 @@ int poll(struct pollfd *fds, unsigned int nfds, int timo);
 #define SOL_TCP 6
 #endif
 
-void srandom(unsigned int seed);
-long random(void);
 int getlogin_r(char *buf, size_t size);
 #endif
 

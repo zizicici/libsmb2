@@ -138,19 +138,19 @@ struct smb2dirent {
         struct smb2_stat_64 st;
 };
 
-#if defined(_WINDOWS)
+#if defined(_WINDOWS) || defined(__MINGW32__)
 #ifdef __USE_WINSOCK__
 #include <winsock.h>
 #else
-#include <ws2tcpip.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 #elif defined(_XBOX)
 #include <xtl.h>
 #include <winsockx.h>
 #endif
 
-#if defined(_WINDOWS) || defined(_XBOX)
+#if defined(_WINDOWS) || defined(__MINGW32__) || defined(_XBOX)
 typedef SOCKET t_socket;
 #else
 #ifndef T_SOCKET_DEFINED
@@ -174,9 +174,21 @@ typedef int t_socket;
 #endif
 
 /*
+ * Supply a process-wide cryptographic random source for ports without a
+ * native one. The provider fills the entire buffer and returns 0 on success,
+ * or a positive errno value on failure (EAGAIN if entropy is not ready).
+ * Register it during single-threaded startup, before using libsmb2.
+ * The provider must support concurrent calls if the application uses threads.
+ * NULL selects the built-in system source.
+ */
+typedef int (*smb2_random_provider)(void *buf, size_t len);
+void smb2_set_random_provider(smb2_random_provider provider);
+
+/*
  * Create an SMB2 context.
  * Function returns
- *  NULL  : Failed to create a context.
+ *  NULL  : Failed to create a context; errno indicates the cause, including
+ *          EAGAIN if the random source is still seeding.
  *  *smb2 : A pointer to an smb2 context.
  */
 struct smb2_context *smb2_init_context(void);
@@ -282,6 +294,11 @@ void smb2_fd_event_callbacks(struct smb2_context *smb2,
  * Called to process the events when events become available for the smb2
  * file descriptor.
  *
+ * Event callbacks, including timeout and shutdown completions, can submit
+ * asynchronous work. A blocking SMB call on the same context returns
+ * -EDEADLK (or NULL with errno set to EDEADLK for pointer results).
+ * A recursive service call returns -EDEADLK and leaves the context usable.
+ *
  * Returns:
  *  0 : Success
  * <0 : Unrecoverable failure. At this point the context can no longer be
@@ -289,6 +306,11 @@ void smb2_fd_event_callbacks(struct smb2_context *smb2,
  *
  */
 int smb2_service(struct smb2_context *smb2, int revents);
+
+/* Nonzero while the event loop or a queue abort is dispatching callbacks.
+ * A synchronous call that needs to drive this context can start after dispatch returns. */
+#define SMB2_HAVE_IS_DISPATCHING 1
+int smb2_is_dispatching(struct smb2_context *smb2);
 
 /*
  * Called to process the events when events become available for the smb2
@@ -312,6 +334,9 @@ int smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents);
  * SMB2_STATUS_IO_TIMEOUT.
  * If you use timeouts with the async API you must make sure to call
  * smb2_service() at least once every second.
+ * smb2_service() returns -ETIMEDOUT if a partial frame stalls or a timed-out
+ * CREATE or its cleanup CLOSE cannot finish within the cleanup interval.
+ * Destroy the context to complete its outstanding callbacks.
  *
  * Default is 0: No timeout.
  */
@@ -761,6 +786,10 @@ void smb2_add_unrelated_compound_pdu(struct smb2_context *smb2,
 
 void smb2_free_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu);
+/* Returns 0 when submitted or completed inline, or -errno when rejected
+ * without a callback. The usual PDU ownership rules apply in both cases. */
+#define SMB2_HAVE_QUEUE_PDU_CHECKED 1
+int smb2_queue_pdu_checked(struct smb2_context *smb2, struct smb2_pdu *pdu);
 
 /*
  * These are used to access/modify pdus from application level
@@ -871,6 +900,8 @@ void smb2_seekdir(struct smb2_context *smb2, struct smb2dir *smb2dir,
  * OPEN
  */
 struct smb2fh;
+/* Open a directory handle, including on hosts without O_DIRECTORY. */
+#define SMB2_O_DIRECTORY 0x10000000
 /*
  * Async open()
  *
@@ -890,6 +921,7 @@ struct smb2fh;
  * O_SYNC
  * O_CREAT
  * O_EXCL
+ * SMB2_O_DIRECTORY (native O_DIRECTORY is also accepted when available)
  *
  * When the callback is invoked, status indicates the result:
  *      0 : Success.
@@ -928,6 +960,10 @@ struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
  */
 /*
  * Async close()
+ *
+ * A return of 0 transfers ownership of fh to the library, including when
+ * the callback reports a timeout. An immediate submission error leaves fh
+ * with the caller.
  *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
@@ -1065,6 +1101,8 @@ int smb2_pwrite(struct smb2_context *smb2, struct smb2fh *fh,
  */
 /*
  * Async read()
+ * Reads and writes using the current file position execute in submission
+ * order on each handle. Short transfers advance by the completed byte count.
  *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
@@ -1095,6 +1133,8 @@ int smb2_read(struct smb2_context *smb2, struct smb2fh *fh,
  */
 /*
  * Async write()
+ * Pending sequential reads and writes on this handle complete first.
+ * Use smb2_pwrite_async() to pipeline writes at explicit offsets.
  *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
@@ -1124,7 +1164,8 @@ int smb2_write(struct smb2_context *smb2, struct smb2fh *fh,
  * Sync lseek()
  */
 /*
- * SEEK_SET and SEEK_CUR are fully supported. On error the position is unchanged.
+ * A successful seek sets the position for subsequently submitted operations.
+ * A failed seek preserves the current position.
  * SEEK_END only returns the end-of-file from the original open.
  * (it will not call fstat to discover the current file size and will not block)
  */

@@ -10,9 +10,11 @@ libsmb2_la_SOURCES = \
 	aes.h \
 	aes_reference.c \
 	aes.c \
-	aes128ccm.h \
+	aes128ccm-private.h aes128ccm.h \
 	aes_apple.c \
 	aes128ccm.c \
+	aes-armv8.h \
+	aes-armv8.c \
 	alloc.c \
 	asn1-ber.c \
 	compat.c \
@@ -83,6 +85,7 @@ libsmb2_la_LDFLAGS = \
 	-version-info $(SOCURRENT):$(SOREVISION):$(SOAGE) -bindir $(bindir) \
 	-no-undefined -export-symbols $(srcdir)/libsmb2.syms $(MAYBE_LIBKRB5) \
 	$(MAYBE_LIBQUIC) $(MAYBE_LIBRDMACM) $(MAYBE_LIBCRYPTO)
+libsmb2_la_LIBADD = $(LIBSOCKET)
 libsmb2_la_DEPENDENCIES = $(srcdir)/libsmb2.syms
 
 dist_noinst_DATA = libsmb2.syms

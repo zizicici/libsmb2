@@ -335,6 +335,9 @@ int dcerpc_call_async(struct dcerpc_context *dce,
  * Returns the decoded reply root on success (same ownership as the async
  * callback's command_data). Free with dcerpc_free_data(dce, rep).
  * Returns NULL on failure; check dcerpc_get_error() / smb2_get_error().
+ * If the transport wait fails while an RPC is outstanding, destroy this
+ * context and open a fresh pipe before calling again. For a protected pipe,
+ * establish a fresh Schannel association as well.
  */
 void *dcerpc_call(struct dcerpc_context *dce,
                   int opnum,

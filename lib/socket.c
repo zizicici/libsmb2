@@ -110,7 +110,6 @@
 #include <ps2sdkapi.h>
 #endif
 
-#include "slist.h"
 #include "smb2.h"
 #include "libsmb2.h"
 #include "smb3-seal.h"
@@ -125,7 +124,7 @@
  * Since the smb is most likely used on local network, use an aggressive
  * timeout of 100ms. */
 #define HAPPY_EYEBALLS_TIMEOUT 100
-#if !defined(HAVE_LINGER)
+#if !defined(HAVE_LINGER) && !defined(_WIN32)
 struct linger
 {
         int     l_onoff;    /* Linger active        */
@@ -283,7 +282,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 smb2_set_error(smb2, "trying to write but not connected");
                 return -1;
         }
-        while ((pdu = smb2->outqueue) != NULL) {
+        while (smb2->lifetime == SMB2_CONTEXT_LIVE && (pdu = smb2->outqueue) != NULL) {
                 struct iovec iov[SMB2_MAX_VECTORS] _U_;
                 struct iovec *tmpiov;
                 struct smb2_pdu *tmp_pdu;
@@ -293,7 +292,9 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 uint32_t spl = 0, tmp_spl, credit_charge;
 
                 credit_charge = smb2_get_credit_charge(smb2, pdu);
-                if (credit_charge > (uint32_t)smb2->credits) {
+                /* A negative balance would pass the unsigned comparison. */
+                if (smb2->credits < 0 ||
+                    credit_charge > (uint32_t)smb2->credits) {
                         return 0;
                 }
 
@@ -378,7 +379,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                 pdu->out.num_done += (size_t)count;
 
                 if (pdu->out.num_done == SMB2_SPL_SIZE + spl) {
-                        SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
+                        smb2_unlink_pdu(smb2, pdu);
                         smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
                         while (pdu) {
                                 tmp_pdu = pdu->next_compound;
@@ -405,7 +406,7 @@ smb2_write_to_socket(struct smb2_context *smb2)
                                                 smb2_free_pdu(smb2, pdu);
                                         } else {
                                                 /* queue requests we send to correlate replies with */
-                                                SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                                                smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
                                         }
                                 }
                                 else {
@@ -457,6 +458,31 @@ smb2_pdu_bytes_left(struct smb2_context *smb2)
                 return -1;
         }
         return elem;
+}
+
+static int
+smb2_pending_reply(struct smb2_context *smb2)
+{
+        struct smb2_pdu *pdu;
+
+        if (!smb2_is_server(smb2)) {
+                pdu = smb2_find_pdu(smb2, smb2->hdr.message_id);
+                if (pdu) {
+                        if (smb2_reply_matches_request(smb2, pdu)) {
+                                return -1;
+                        }
+                        /* Keep the AsyncId for CANCEL and the request for its final reply. */
+                        if (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND) {
+                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
+                                pdu->header.async.async_id = smb2->hdr.async.async_id;
+                        }
+                        if (smb2->passthrough && pdu->report_pending && pdu->cb) {
+                                pdu->cb(smb2, SMB2_STATUS_PENDING, pdu->payload, pdu->cb_data);
+                        }
+                }
+        }
+        smb2->in.num_done = 0;
+        return 0;
 }
 
 typedef ssize_t (*read_func)(struct smb2_context *smb2,
@@ -718,7 +744,7 @@ read_more_data:
                         while (count > 0);
 
                         /* put on wait queue so queue_pdu doesn't complain */
-                        SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                        smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
 
                         smb2->in.num_done = 0;
                         pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
@@ -732,6 +758,19 @@ read_more_data:
 
                 if (!smb2_is_server(smb2)) {
                         smb2->credits += smb2->hdr.credit_request_response;
+                        /*
+                         * A server granting 65535 per reply walks this int
+                         * past INT_MAX in ~32k replies; a negative balance
+                         * then turns the read/write credit clamp into a
+                         * multi-GiB request length (and passes the unsigned
+                         * send gate). The client never asks for more than
+                         * MAX_CREDITS in total (pdu.c), so a larger balance
+                         * is unusable anyway; it would also make that
+                         * request field wrap.
+                         */
+                        if (smb2->credits > MAX_CREDITS) {
+                                smb2->credits = MAX_CREDITS;
+                        }
                         /* Got credit, recheck if there are pending pdu to be sent. */
                         smb2_change_events(smb2, smb2->fd, smb2_which_events(smb2));
                 }
@@ -781,35 +820,7 @@ read_more_data:
                                  * header-only PDU, where the only vector is
                                  * the header itself.
                                  */
-                                if (!smb2_is_server(smb2)) {
-                                        pdu = smb2_find_pdu(smb2,
-                                                        smb2->hdr.message_id);
-                                        if (pdu != NULL &&
-                                            smb2_reply_matches_request(smb2, pdu)) {
-                                                return -1;
-                                        }
-                                        if (pdu != NULL &&
-                                            (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
-                                                /*
-                                                 * Remember the AsyncId from this
-                                                 * interim response so the request
-                                                 * can still be cancelled correctly
-                                                 * (MS-SMB2 2.2.30). The final reply
-                                                 * is still correlated by MessageId,
-                                                 * so the pdu stays on the wait
-                                                 * queue as-is.
-                                                 */
-                                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
-                                                pdu->header.async.async_id = smb2->hdr.async.async_id;
-                                        }
-                                        if (smb2->passthrough && pdu) {
-                                                pdu->cb(smb2, smb2->hdr.status,
-                                                        pdu->payload,
-                                                        pdu->cb_data);
-                                        }
-                                }
-                                smb2->in.num_done = 0;
-                                return 0;
+                                return smb2_pending_reply(smb2);
                         }
                         /* Add padding before the next PDU */
                         smb2->recv_state = SMB2_RECV_PAD;
@@ -913,7 +924,11 @@ read_more_data:
                                         return -1;
                                 }
 
-                                SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+                                smb2_unlink_pdu(smb2, pdu);
+                                if (pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
+                                        /* Allow a full interval for the body of a late CREATE reply. */
+                                        pdu->timeout = time(NULL) + pdu->cleanup_timeout;
+                                }
                         } else {
                                 /* oplock and lease break notifications won't have a pdu so make one
                                  * oplock replies (that are NOT notifications, i.e. have a valid message_id)
@@ -952,6 +967,7 @@ read_more_data:
                         return -1;
                 }
 
+                smb2->frame_deadline = 0;
                 smb2->recv_state = SMB2_RECV_FIXED;
                 {
                         size_t alen = len & 0xfffe;
@@ -1098,6 +1114,7 @@ read_more_data:
                  * encrypted packet.
                  */
                 smb2->in.num_done = 0;
+                smb2->frame_deadline = 0;
                 if (smb3_decrypt_pdu(smb2)) {
                         smb2_set_error(smb2, "Failed to decrypyt pdu");
                         return -1;
@@ -1122,42 +1139,7 @@ read_more_data:
         }
 
         if (smb2->hdr.status == SMB2_STATUS_PENDING) {
-                /* This was a pending command. Just ignore it and proceed
-                 * to read the next chain.
-                 */
-                if (!smb2_is_server(smb2)) {
-                        pdu = smb2_find_pdu(smb2, smb2->hdr.message_id);
-                        if (pdu != NULL &&
-                            smb2_reply_matches_request(smb2, pdu)) {
-                                return -1;
-                        }
-                        if (pdu != NULL &&
-                            (smb2->hdr.flags & SMB2_FLAGS_ASYNC_COMMAND)) {
-                                /*
-                                 * Remember the AsyncId from this interim
-                                 * response so the request can still be
-                                 * cancelled correctly (MS-SMB2 2.2.30). The
-                                 * final reply is still correlated by
-                                 * MessageId, so the pdu stays on the wait
-                                 * queue as-is.
-                                 */
-                                pdu->header.flags |= SMB2_FLAGS_ASYNC_COMMAND;
-                                pdu->header.async.async_id = smb2->hdr.async.async_id;
-                        }
-                        if (smb2->passthrough) {
-                                if (pdu == NULL) {
-                                        smb2_set_error(smb2, "no matching PDU found");
-                                }
-                                else
-                                {
-                                        /* need to pass all pdus through note we do not free
-                                        * the pdu or delist the request */
-                                        pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
-                                }
-                        }
-                }
-                smb2->in.num_done = 0;
-                return 0;
+                return smb2_pending_reply(smb2);
         }
 
         /* We don't yet have the signing key until later, once session
@@ -1215,7 +1197,7 @@ read_more_data:
 
         if (smb2_is_server(smb2)) {
                 /* queue requests to correlate our replies we send back later */
-                SMB2_LIST_ADD_END(&smb2->waitqueue, pdu);
+                smb2_append_pdu(smb2, &smb2->waitqueue, pdu);
                 pdu->cb(smb2, smb2->hdr.status, pdu->payload, pdu->cb_data);
                 smb2->pdu = smb2->next_pdu;
                 smb2->next_pdu = NULL;
@@ -1267,6 +1249,9 @@ smb2_read_from_socket(struct smb2_context *smb2)
         int count;
 
         while(1) {
+                if (smb2->lifetime != SMB2_CONTEXT_LIVE) {
+                        return 0;
+                }
                 /* A callback closed the connection: whoever did set the
                  * error, do not replace it with that of a read on a closed
                  * socket.
@@ -1280,6 +1265,7 @@ smb2_read_from_socket(struct smb2_context *smb2)
                  * the corresponding pdu.
                  */
                 if (smb2->in.num_done == 0) {
+                        smb2->frame_deadline = 0;
                         smb2->recv_state = SMB2_RECV_SPL;
                         smb2->spl = 0;
 
@@ -1344,8 +1330,8 @@ smb2_close_connecting_fd(struct smb2_context *smb2, t_socket fd)
         }
 }
 
-int
-smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
+static int
+service_fd(struct smb2_context *smb2, t_socket fd, int revents)
 {
         int ret = 0;
 
@@ -1595,10 +1581,31 @@ smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
         }
 
   out:
-        if (smb2->timeout) {
-                smb2_timeout_pdus(smb2);
+        if (smb2->lifetime == SMB2_CONTEXT_LIVE && smb2_timeout_pdus(smb2) < 0) {
+                return -ETIMEDOUT;
         }
         return ret;
+}
+
+int
+smb2_is_dispatching(struct smb2_context *smb2)
+{
+        return smb2 && smb2->servicing;
+}
+
+int
+smb2_service_fd(struct smb2_context *smb2, t_socket fd, int revents)
+{
+        int rc;
+
+        if (smb2_is_dispatching(smb2)) {
+                return -EDEADLK;
+        }
+        smb2->servicing = 1;
+        rc = service_fd(smb2, fd, revents);
+        smb2->servicing = 0;
+        smb2_finish_dispatch(smb2);
+        return rc;
 }
 
 int
@@ -1934,7 +1941,7 @@ smb2_connect_async(struct smb2_context *smb2, const char *server,
         err = getaddrinfo(host, port, NULL, &smb2->addrinfos);
         if (err != 0) {
                 free(addr);
-#if defined(_WINDOWS) || defined(_XBOX)
+#if defined(_WINDOWS) || defined(__MINGW32__) || defined(_XBOX)
                 if (err == WSANOTINITIALISED)
                 {
                         smb2_set_error(smb2, "Winsock was not initialized. "
@@ -2009,7 +2016,7 @@ smb2_bind_and_listen(const uint16_t port, const int max_connections, int *out_fd
         socklen_t socksize;
         struct sockaddr_in serv_addr;
 #if defined(SO_REUSEADDR) && !defined(_WIN32) && !defined(_MSC_VER)
-        int const yes = 1;
+        int yes = 1;
 #endif
 
              *out_fd = -1;
@@ -2032,7 +2039,7 @@ smb2_bind_and_listen(const uint16_t port, const int max_connections, int *out_fd
          * process take over a port we are already listening on.
          */
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-                   (const void *)&yes, sizeof(yes));
+                   &yes, sizeof(yes));
 #endif
 
         memset(&serv_addr, 0, sizeof(serv_addr));
@@ -2098,7 +2105,7 @@ int smb2_accept_connection_async(const int fd, const int to_msec, smb2_accepted_
                         return 0;
                 }
 #endif
-                if (clientfd >= 0) {
+                if (SMB2_VALID_SOCKET(clientfd)) {
                         set_nonblocking(clientfd);
                         set_tcp_sockopt(clientfd, TCP_NODELAY, 1);
 #if 0 == CONFIGURE_OPTION_TCP_LINGER

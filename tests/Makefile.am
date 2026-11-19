@@ -13,6 +13,20 @@ noinst_PROGRAMS += sync-stat-unit
 
 noinst_PROGRAMS += set-info-unit
 
+noinst_PROGRAMS += entropy-unit
+noinst_PROGRAMS += prog_sequential_io
+noinst_PROGRAMS += notify-handle-unit open-cancel-unit
+noinst_PROGRAMS += link-handle-unit iop-entropy-unit aes128ccm-test
+
+aes128ccm_test_SOURCES = aes128ccm-test.c ../lib/aes128ccm.c ../lib/aes-armv8.c \
+        ../lib/aes.c ../lib/aes_apple.c ../lib/aes_reference.c
+aes128ccm_test_LDADD = $(MAYBE_LIBCRYPTO)
+
+iop_entropy_unit_SOURCES = iop-entropy-unit.c ../lib/ps2/entropy.c \
+        ../lib/hmac.c ../lib/usha.c ../lib/sha224-256.c
+iop_entropy_unit_CFLAGS = $(AM_CFLAGS) -DUSE_SHA384_SHA512=0
+iop_entropy_unit_LDADD =
+
 EXTRA_PROGRAMS = ld_sockerr
 CLEANFILES = ld_sockerr.o ld_sockerr.so
 
@@ -30,6 +44,8 @@ ld_sockerr.so: ld_sockerr.o
 T = "$(srcdir)"/test_*.sh
 
 test: $(noinst_PROGRAMS) $(bin_SCRIPTS)
+	./aes128ccm-test
+	./notify-handle-unit
 	srcdir="$(srcdir)"; export srcdir; for TEST in $(T); do \
 		echo "Running $$TEST"; \
 		echo "--------------"; \
