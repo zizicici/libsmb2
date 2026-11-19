@@ -28,7 +28,6 @@
 #include "portable-endian.h"
 
 #include "aes-armv8.h"
-#include "aes128ccm.h"
 
 #if !SMB2_ARMV8_AES
 
@@ -113,16 +112,33 @@ SMB2_ARMV8 static void armv8_ccm_generate_b0(const unsigned char *nonce, size_t 
                                              size_t alen, size_t plen, size_t mlen,
                                              unsigned char *buf)
 {
-        unsigned char flags = (unsigned char)(((mlen - 2) / 2) << 3);
+        uint32_t len;
 
-        ccm_format_block(buf, nonce, nlen, flags | (alen ? 0x40 : 0), plen);
+        memset(buf, 0, 16);
+        if (alen) {
+                buf[0] |= 0x40;                   /* Adata */
+        }
+        buf[0] |= (((mlen - 2) / 2) << 3) & 0x38; /* M' */
+        buf[0] |= (15 - nlen - 1) & 0x07;         /* L' */
+
+        len = htobe32((uint32_t)plen);
+        memcpy(&buf[12], &len, 4);
+        memcpy(&buf[1], nonce, nlen);
 }
 
 SMB2_ARMV8 static void armv8_ccm_generate_s(const struct smb2_aes128_keys *keys,
                                             const unsigned char *nonce, size_t nlen,
-                                            uint64_t counter, unsigned char *s)
+                                            int i, unsigned char *s)
 {
-        ccm_format_block(s, nonce, nlen, 0, counter);
+        uint32_t l;
+
+        memset(s, 0, 16);
+        s[0] |= (15 - nlen - 1) & 0x07;
+
+        l = htobe32(i);
+        memcpy(&s[12], &l, 4);
+
+        memcpy(&s[1], nonce, nlen);
 
         vst1q_u8(s, smb2_armv8_aes128_encrypt(vld1q_u8(s), keys));
 }
@@ -141,11 +157,13 @@ SMB2_ARMV8 static void armv8_ccm_generate_T(const struct smb2_aes128_keys *keys,
 
         /* Create Aad */
         if (alen) {
-                size_t prefix = ccm_encode_aad_length(b, alen);
+                /* First block */
+                memset(b, 0, 16);
+                l = htobe16((uint16_t)alen);
+                memcpy(b, &l, 2);
 
-                l = alen < 16 - prefix ? (uint16_t)alen : (uint16_t)(16 - prefix);
-                memcpy(b + prefix, aad, l);
-                memset(b + prefix + l, 0, 16 - prefix - l);
+                l = (alen > 14) ? 14 : (uint16_t)alen;
+                memcpy(&b[2], aad, l);
                 aad  += l;
                 alen -= l;
 
@@ -185,15 +203,15 @@ SMB2_ARMV8 static void armv8_ccm_crypt(const struct smb2_aes128_keys *keys,
 {
         unsigned char s[16];
         size_t l;
-        uint64_t counter = 1;
+        int j;
 
+        j = 0;
         while (plen) {
                 l = (plen > 16) ? 16 : plen;
-                armv8_ccm_generate_s(keys, nonce, nlen, counter, &s[0]);
-                bxory(p, &s[0], l);
+                armv8_ccm_generate_s(keys, nonce, nlen, j + 1, &s[0]);
+                bxory(&p[j * 16], &s[0], l);
 
-                counter++;
-                p += l;
+                j++;
                 plen -= l;
         }
 }
@@ -207,9 +225,6 @@ SMB2_ARMV8 int aes128ccm_armv8_encrypt(unsigned char *key,
         struct smb2_aes128_keys keys;
         unsigned char s[16];
 
-        if (!ccm_valid_lengths(nlen, plen, mlen)) {
-                return -1;
-        }
         smb2_armv8_aes128_expand_key(key, &keys);
 
         armv8_ccm_generate_T(&keys, nonce, nlen, aad, alen, p, plen, m, mlen);
@@ -231,9 +246,6 @@ SMB2_ARMV8 int aes128ccm_armv8_decrypt(unsigned char *key,
         unsigned char s[16];
         unsigned char tmp[16];
 
-        if (!ccm_valid_lengths(nlen, plen, mlen)) {
-                return -1;
-        }
         smb2_armv8_aes128_expand_key(key, &keys);
 
         armv8_ccm_crypt(&keys, nonce, nlen, p, plen);

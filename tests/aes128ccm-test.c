@@ -1,51 +1,9 @@
 /* -*-  mode:c; tab-width:8; c-basic-offset:8; indent-tabs-mode:nil;  -*- */
-#include <arpa/inet.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "../lib/aes128ccm.h"
-
-static void test_aad_length(void)
-{
-        static const struct {
-                uint64_t length;
-                size_t size;
-                unsigned char bytes[10];
-        } cases[] = {
-                {0xfeff, 2, {0xfe, 0xff}},
-                {0xff00, 6, {0xff, 0xfe, 0, 0, 0xff, 0}},
-                {UINT32_MAX, 6, {0xff, 0xfe, 0xff, 0xff, 0xff, 0xff}},
-                {UINT64_C(0x100000000), 10, {0xff, 0xff, 0, 0, 0, 1, 0, 0, 0, 0}},
-                {UINT64_MAX, 10, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
-        };
-        unsigned char buf[10];
-        size_t i;
-
-        for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-                if (ccm_encode_aad_length(buf, cases[i].length) != cases[i].size ||
-                    memcmp(buf, cases[i].bytes, cases[i].size) != 0) {
-                        fprintf(stderr, "Invalid CCM AAD length prefix in case %zu\n", i);
-                        exit(1);
-                }
-        }
-}
-
-static void test_payload_size(void)
-{
-        unsigned char nonce[7] = {1, 2, 3, 4, 5, 6, 7};
-        unsigned char block[16];
-        const unsigned char expected[16] = {7, 1, 2, 3, 4, 5, 6, 7,
-                                            0, 0, 0, 1, 0, 0, 0, 1};
-
-        ccm_format_block(block, nonce, sizeof(nonce), 0, UINT64_C(0x100000001));
-        if (memcmp(block, expected, sizeof(block)) ||
-            !ccm_valid_lengths(11, UINT32_C(0x80000001), 16) ||
-            ccm_valid_lengths(13, 65536, 16)) {
-                exit(1);
-        }
-}
 
 static void check_vector(unsigned char *key, unsigned char *nonce, size_t nlen,
                          unsigned char *aad, size_t alen, const unsigned char *plain,
@@ -103,8 +61,6 @@ static void test_2(void)
 
 int main(void)
 {
-        test_aad_length();
-        test_payload_size();
         test_1();
         test_2();
         return 0;

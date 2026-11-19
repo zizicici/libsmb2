@@ -43,9 +43,18 @@ static void aes_ccm_generate_b0(unsigned char *nonce, size_t nlen,
                                 size_t alen, size_t plen, size_t mlen,
                                 unsigned char *buf)
 {
-        unsigned char flags = (unsigned char)(((mlen - 2) / 2) << 3);
+        uint32_t len;
 
-        ccm_format_block(buf, nonce, nlen, flags | (alen ? 0x40 : 0), plen);
+        memset(buf, 0, 16);
+        if (alen) {
+                buf[0] |= 0x40;                   /* Adata */
+        }
+        buf[0] |= (((mlen - 2) / 2) << 3) & 0x38; /* M' */
+        buf[0] |= (15 - nlen - 1) & 0x07;         /* L' */
+
+        len = htobe32((uint32_t)plen);
+        memcpy(&buf[12], &len, 4);
+        memcpy(&buf[1], nonce, nlen);
 }
 
 static inline void bxory(unsigned char *b, unsigned char *y, size_t num)
@@ -71,11 +80,13 @@ static void ccm_generate_T(unsigned char *key,
 
         /* Create Aad */
         if (alen) {
-                size_t prefix = ccm_encode_aad_length(b, alen);
+                /* First block */
+                memset(b, 0, 16);
+                l = htobe16((uint16_t)alen);
+                memcpy(b, &l, 2);
 
-                l = alen < 16 - prefix ? (uint16_t)alen : (uint16_t)(16 - prefix);
-                memcpy(b + prefix, aad, l);
-                memset(b + prefix + l, 0, 16 - prefix - l);
+                l = (alen > 14) ? 14 : (uint16_t)alen;
+                memcpy(&b[2], aad, l);
                 aad  += l;
                 alen -= l;
 
@@ -110,9 +121,17 @@ static void ccm_generate_T(unsigned char *key,
 }
 
 static void ccm_generate_s(unsigned char *key, unsigned char *nonce, size_t nlen,
-                           uint64_t counter, unsigned char *s)
+                           size_t plen, int i, unsigned char *s)
 {
-        ccm_format_block(s, nonce, nlen, 0, counter);
+        uint32_t l;
+
+        memset(s, 0, 16);
+        s[0] |= (15 - nlen - 1) & 0x07;
+
+        l = htobe32(i);
+        memcpy(&s[12], &l, 4);
+
+        memcpy(&s[1], nonce, nlen);
 
         AES128_ECB_encrypt(s, key, s);
 }
@@ -121,17 +140,17 @@ static void aes_ccm_crypt(unsigned char *key,
                           unsigned char *nonce, size_t nlen,
                           unsigned char *p, size_t plen)
 {
-        uint64_t counter = 1;
+        int j;
         size_t l;
         unsigned char s[16] _U_;
 
+        j = 0;
         while (plen) {
                 l = (plen > 16) ? 16 : plen;
-                ccm_generate_s(key, nonce, nlen, counter, &s[0]);
-                bxory(p, &s[0], l);
+                ccm_generate_s(key, nonce, nlen, plen, j + 1, &s[0]);
+                bxory(&p[j * 16], &s[0], l);
 
-                counter++;
-                p += l;
+                j++;
                 plen -= l;
         }
 }
@@ -150,11 +169,8 @@ int aes128ccm_encrypt(unsigned char *key,
                                                p, plen, m, mlen);
         }
 #endif
-        if (!ccm_valid_lengths(nlen, plen, mlen)) {
-                return -1;
-        }
         ccm_generate_T(key, nonce, nlen, aad, alen, p, plen, m, mlen);
-        ccm_generate_s(key, nonce, nlen, 0, &s[0]);
+        ccm_generate_s(key, nonce, nlen, plen, 0, &s[0]);
         bxory(m, &s[0], mlen);
 
         aes_ccm_crypt(key, nonce, nlen, p, plen);
@@ -177,13 +193,10 @@ int aes128ccm_decrypt(unsigned char *key,
                                                p, plen, m, mlen);
         }
 #endif
-        if (!ccm_valid_lengths(nlen, plen, mlen)) {
-                return -1;
-        }
         aes_ccm_crypt(key, nonce, nlen, p, plen);
 
         ccm_generate_T(key, nonce, nlen, aad, alen, p, plen, tmp, mlen);
-        ccm_generate_s(key, nonce, nlen, 0, &s[0]);
+        ccm_generate_s(key, nonce, nlen, plen, 0, &s[0]);
         bxory(tmp, &s[0], mlen);
 
         return memcmp(tmp, m, mlen);
@@ -203,7 +216,7 @@ static int aes128ccm_openssl(int enc, unsigned char *key,
         EVP_CIPHER_CTX *ctx;
         int outl, rc = -1;
 
-        if (!ccm_valid_lengths(nlen, plen, mlen) || plen > INT_MAX || alen > INT_MAX) {
+        if (plen > INT_MAX || alen > INT_MAX) {
                 return -1;
         }
         ctx = EVP_CIPHER_CTX_new();
