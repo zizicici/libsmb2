@@ -23,7 +23,7 @@
 static const uint32_t original_tree = 11, other_tree = 22;
 static const smb2_file_id opened_id = {1, 2, 3, 4, 5, 6, 7, 8};
 
-enum operation { UNLINK_DIRECTORY, UNLINK_LINK, CREATE_LINK, FAIL_CREATE_LINK };
+enum operation { UNLINK_DIRECTORY, UNLINK_NO_TAG, UNLINK_TAG_EOF, UNLINK_LINK, CREATE_LINK, FAIL_CREATE_LINK };
 
 struct result {
         int completed;
@@ -79,7 +79,7 @@ static void run(struct smb2_context *smb2, enum operation op)
         struct smb2_create_reply created = {0};
         struct smb2_query_info_reply query = {0};
         struct smb2_file_attribute_tag_info *tag;
-        int unlink_op = op == UNLINK_DIRECTORY || op == UNLINK_LINK;
+        int unlink_op = op <= UNLINK_LINK;
 
         smb2->credits = 32;
         assert(!smb2_select_tree_id(smb2, original_tree));
@@ -98,7 +98,11 @@ static void run(struct smb2_context *smb2, enum operation op)
         }
         memcpy(created.file_id, opened_id, sizeof(opened_id));
         reply(smb2, SMB2_CREATE, 0, &created, &result, -1);
-        if (unlink_op) {
+        if (op == UNLINK_NO_TAG) {
+                reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED, NULL, &result, -1);
+        } else if (op == UNLINK_TAG_EOF) {
+                reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_END_OF_FILE, NULL, &result, -1);
+        } else if (unlink_op) {
                 tag = smb2_alloc_init(smb2, sizeof(*tag));
                 assert(tag);
                 tag->file_attributes = SMB2_FILE_ATTRIBUTE_DIRECTORY;
@@ -118,6 +122,12 @@ static void run(struct smb2_context *smb2, enum operation op)
         reply(smb2, SMB2_CLOSE, 0, NULL, &result, 8);
         assert(result.completed == 1 && smb2->waitqueue == NULL);
         assert((result.status == 0) == (op == UNLINK_LINK || op == CREATE_LINK));
+        if (op == UNLINK_DIRECTORY || op == UNLINK_NO_TAG) {
+                assert(result.status == -EISDIR);
+        }
+        if (op == UNLINK_TAG_EOF) {
+                assert(result.status == -EIO);
+        }
         if (op == FAIL_CREATE_LINK) {
                 assert(result.status == -EACCES);
         }

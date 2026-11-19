@@ -2679,7 +2679,7 @@ static int unlink_dir_link_async(struct smb2_context *smb2, const char *path,
 static void
 create_complete(struct smb2_context *smb2, struct create_cb_data *create_data)
 {
-        int status = -nterror_to_errno(create_data->status);
+        int status = create_data->status ? command_error(create_data->status) : 0;
 
         if (create_data->status == SMB2_STATUS_FILE_IS_A_DIRECTORY &&
             create_data->unlink_path) {
@@ -3767,7 +3767,7 @@ link_finish(struct smb2_context *smb2, struct symlink_cb_data *data,
         if (data->close_pdu) {
                 smb2_free_pdu(smb2, data->close_pdu);
         }
-        data->cb(smb2, -nterror_to_errno(status), NULL, data->cb_data);
+        data->cb(smb2, status ? command_error(status) : 0, NULL, data->cb_data);
         free_symlink_data(data);
 }
 
@@ -3921,6 +3921,11 @@ unlink_dir_tag_cb(struct smb2_context *smb2, int status,
                         }
                         smb2_free_data(smb2, tag);
                 }
+        } else if (status == SMB2_STATUS_NOT_SUPPORTED ||
+                   status == SMB2_STATUS_INVALID_INFO_CLASS ||
+                   status == SMB2_STATUS_NOT_IMPLEMENTED) {
+                /* The first CREATE already identified a directory. */
+                status = SMB2_STATUS_FILE_IS_A_DIRECTORY;
         }
         link_request_done(smb2, data, status);
 }
