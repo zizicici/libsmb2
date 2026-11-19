@@ -179,6 +179,7 @@ struct smb2_context {
         const struct addrinfo *next_addrinfo;
 
         int timeout;
+        int may_have_timed_pdus;
 
 #ifdef HAVE_LIBQUIC
         /* "quic" URL argument: SMB2 over QUIC (MS-SMB2 2.1) using the

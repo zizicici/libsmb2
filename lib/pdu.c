@@ -734,6 +734,9 @@ queue_pdu_inner(struct smb2_context *smb2, struct smb2_pdu *pdu, int report_pend
 
         /* Update all the PDU headers in this chain */
         for (p = pdu; p; p = p->next_compound) {
+                if (p->timeout) {
+                        smb2->may_have_timed_pdus = 1;
+                }
                 p->report_pending = report_pending;
                 if (smb2_is_server(smb2)) {
                         /* set reply flag, servers will only reply */
@@ -1332,9 +1335,16 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
 int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
-        time_t t = time(NULL);
+        time_t t;
         int servicing = smb2->servicing;
 
+        if (!smb2->outqueue && !smb2->waitqueue) {
+                smb2->may_have_timed_pdus = 0;
+        }
+        if (!smb2->may_have_timed_pdus && !smb2->io_timers) {
+                return 0;
+        }
+        t = time(NULL);
         smb2->servicing = 1;
 
         pdu = smb2->outqueue;
