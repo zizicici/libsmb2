@@ -3461,11 +3461,6 @@ dcerpc_submit_call(struct dcerpc_context *dce,
         size_t max_frag, len;
         int rc;
 
-        rc = dcerpc_need_smb2(dce);
-        if (rc) {
-                return rc;
-        }
-
         pdu = dcerpc_encode_request(dce, opnum, req_coder, req, &iov);
         if (pdu == NULL) {
                 return -1;
@@ -3544,8 +3539,9 @@ dcerpc_call_async(struct dcerpc_context *dce, int opnum,
 {
         int rc;
 
-        if (dce->destroying) {
-                return -ECANCELED;
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                return rc;
         }
         dce->active++;
         rc = dcerpc_submit_call(dce, opnum, req_coder, req, rep_coder, decode_size, cb, cb_data);
@@ -4145,10 +4141,6 @@ dcerpc_submit_open(struct dcerpc_context *dce, dcerpc_cb cb,
         req.create_options = 0;
         req.name = dce->path;
 
-        if (dce->destroying) {
-                free(data);
-                return -ECANCELED;
-        }
         pdu = smb2_cmd_create_async(dce->smb2, &req, dcerpc_dispatch,
                         dcerpc_stage(data, smb2_open_cb));
         if (pdu == NULL) {
