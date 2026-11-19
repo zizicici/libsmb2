@@ -393,6 +393,7 @@ struct smb2_pdu {
         int unrelated_compound;
 
         int caller_frees_pdu;
+        int report_pending;
         /*
          * Set for the negotiate and session setup pdus that take part in
          * the SMB3.1.1 preauth integrity hash. The hash has to be taken
@@ -551,6 +552,7 @@ int smb2_get_fixed_size(struct smb2_context *smb2, struct smb2_pdu *pdu);
 struct smb2_pdu *smb2_find_pdu(struct smb2_context *smb2, uint64_t message_id);
 void smb2_add_active_context(struct smb2_context *smb2);
 void smb2_set_close_file_id(struct smb2_pdu *pdu, const smb2_file_id file_id);
+int smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_free_iovector(struct smb2_context *smb2, struct smb2_io_vectors *v);
 
 /*
