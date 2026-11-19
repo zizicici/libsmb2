@@ -547,6 +547,7 @@ int smb2_get_fixed_size(struct smb2_context *smb2, struct smb2_pdu *pdu);
 
 struct smb2_pdu *smb2_find_pdu(struct smb2_context *smb2, uint64_t message_id);
 void smb2_add_active_context(struct smb2_context *smb2);
+void smb2_set_close_file_id(struct smb2_pdu *pdu, const smb2_file_id file_id);
 void smb2_free_iovector(struct smb2_context *smb2, struct smb2_io_vectors *v);
 
 /*
