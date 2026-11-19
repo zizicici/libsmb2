@@ -308,6 +308,9 @@ static void timed_read_done(struct smb2_context *smb2, int status, void *args, v
         smb2_set_opaque(smb2, &diagnostics);
         smb2_register_error_callback(smb2, count_diagnostic);
         assert(smb2_close(smb2, rd->fh) == -EDEADLK);
+        assert(smb2_fstat(smb2, rd->fh, NULL) == -EDEADLK);
+        assert(smb2_stat(smb2, "", NULL) == -EDEADLK);
+        assert(smb2_statvfs(smb2, "", NULL) == -EDEADLK);
         assert(!diagnostics);
         smb2_register_error_callback(smb2, NULL);
         smb2_set_opaque(smb2, NULL);
@@ -602,6 +605,59 @@ static void sync_buffers_after_failed_wait(void)
         smb2_destroy_context(smb2);
 }
 
+static void sync_stat_after_failed_wait(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct smb2_query_info_reply query = {0};
+        struct smb2_file_fs_full_size_info *fs;
+        struct smb2_stat_64 by_handle = {0}, by_path = {0};
+        struct smb2_statvfs volume = {0};
+        struct smb2fh *fh;
+        smb2_file_id id = {1};
+        int pair[2], i;
+
+        assert(smb2 && !smb2_connect_tree_id(smb2, 1));
+        assert(!smb2_connect_tree_id(smb2, 2) && !smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        assert(smb2_fstat(smb2, fh, &by_handle) < 0);
+        assert(smb2_stat(smb2, "file", &by_path) < 0);
+        assert(smb2_statvfs(smb2, "", &volume) < 0);
+
+        /* Finish the retained compounds after all three synchronous callers
+         * have returned and reused their output structures. */
+        by_handle.smb2_size = by_path.smb2_size = volume.f_blocks = 123;
+        assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        assert(!smb2_service(smb2, POLLOUT));
+        for (i = 0; i < 2; i++) {
+                struct smb2_file_all_info *file = smb2_alloc_init(smb2, sizeof(*file));
+                assert(file);
+                if (i == 1) {
+                        reply(smb2, SMB2_CREATE, 0, NULL);
+                }
+                reply(smb2, SMB2_QUERY_INFO, SMB2_STATUS_NOT_SUPPORTED, NULL);
+                file->standard.end_of_file = 456;
+                query.output_buffer = file;
+                reply(smb2, SMB2_QUERY_INFO, 0, &query);
+                if (i == 1) {
+                        reply(smb2, SMB2_CLOSE, 0, NULL);
+                }
+        }
+        fs = smb2_alloc_init(smb2, sizeof(*fs));
+        assert(fs);
+        fs->total_allocation_units = 456;
+        query.output_buffer = fs;
+        reply(smb2, SMB2_CREATE, 0, NULL);
+        reply(smb2, SMB2_QUERY_INFO, 0, &query);
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(!smb2->waitqueue && !smb2->outqueue);
+        assert(by_handle.smb2_size == 123 && by_path.smb2_size == 123 && volume.f_blocks == 123);
+        smb2_destroy_context(smb2);
+        close(pair[1]);
+}
+
 static void partial_reply_timeout(int sync_wait)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -705,6 +761,7 @@ int main(void)
         smb2_destroy_context(smb2);
         close(pair[1]);
         sync_buffers_after_failed_wait();
+        sync_stat_after_failed_wait();
         partial_send_timeout();
         partial_reply_timeout(0);
         partial_reply_timeout(1);
