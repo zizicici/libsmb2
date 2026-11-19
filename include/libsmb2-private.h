@@ -849,6 +849,10 @@ int smb2_read_from_buf(struct smb2_context *smb2);
 void smb2_change_events(struct smb2_context *smb2, t_socket fd, int events);
 int smb2_queue_pdu_final(struct smb2_context *smb2, struct smb2_pdu *pdu);
 void smb2_finish_dispatch(struct smb2_context *smb2);
+uint32_t smb2_file_io_length(struct smb2_context *smb2, enum smb2_command command, uint32_t count);
+int smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh,
+                       enum smb2_command command, void *buf, uint32_t count,
+                       const uint64_t *position, smb2_command_cb cb, void *cb_data);
 void smb2_timeout_file_io(struct smb2_context *smb2, time_t now);
 int smb2_timeout_pdus(struct smb2_context *smb2);
 

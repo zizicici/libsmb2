@@ -555,6 +555,32 @@ static void release_from_cancel(void)
         close(pair[1]);
 }
 
+static void sync_buffers_after_failed_wait(void)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        struct smb2_pdu *pdu;
+        struct smb2_iovec *payload;
+        smb2_file_id id = {1};
+        struct smb2fh *fh;
+        uint8_t input = 7, output = 0;
+
+        assert(smb2);
+        fh = smb2_fh_from_file_id(smb2, &id);
+        assert(fh);
+        /* The disconnected transport retains both unsent operations. */
+        assert(smb2_pread(smb2, fh, &output, 1, 0) < 0);
+        assert(smb2_write(smb2, fh, &input, 1) < 0);
+        pdu = smb2->outqueue;
+        assert(pdu && pdu->header.command == SMB2_READ && pdu->in.niov == 1);
+        assert(pdu->in.iov[0].buf != &output);
+        pdu = pdu->next;
+        assert(pdu && pdu->header.command == SMB2_WRITE);
+        payload = &pdu->out.iov[pdu->out.niov - 1];
+        input = 8;
+        assert(payload->len == 1 && *payload->buf == 7);
+        smb2_destroy_context(smb2);
+}
+
 static void partial_send_timeout(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -621,6 +647,7 @@ int main(void)
         disconnect_during_copy(smb2, pair[1]);
         smb2_destroy_context(smb2);
         close(pair[1]);
+        sync_buffers_after_failed_wait();
         partial_send_timeout();
         release_from_cancel();
         release_with_queued_truncate();

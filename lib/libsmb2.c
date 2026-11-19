@@ -2301,10 +2301,11 @@ positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
         }
 }
 
-static uint32_t
-file_io_length(struct smb2_context *smb2, uint32_t count, uint32_t negotiated_max)
+uint32_t
+smb2_file_io_length(struct smb2_context *smb2, enum smb2_command command, uint32_t count)
 {
         uint32_t credits = 1;
+        uint32_t negotiated_max = command == SMB2_READ ? smb2->max_read_size : smb2->max_write_size;
 
         if (negotiated_max) {
                 count = MIN(count, negotiated_max);
@@ -2374,7 +2375,7 @@ submit_read_write(struct smb2_context *smb2, struct file_io *io)
                 io->args.read.offset = io->offset;
                 req.offset = io->offset;
                 req.buf = io->args.read.buf;
-                req.length = file_io_length(smb2, io->args.read.count, smb2->max_read_size);
+                req.length = smb2_file_io_length(smb2, SMB2_READ, io->args.read.count);
                 memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
                 pdu = smb2_cmd_read_async(smb2, &req, read_write_cb, io);
         } else {
@@ -2382,7 +2383,7 @@ submit_read_write(struct smb2_context *smb2, struct file_io *io)
                 io->args.write.offset = io->offset;
                 req.offset = io->offset;
                 req.buf = io->args.write.buf;
-                req.length = file_io_length(smb2, io->args.write.count, smb2->max_write_size);
+                req.length = smb2_file_io_length(smb2, SMB2_WRITE, io->args.write.count);
                 io->sent = req.length;
                 memcpy(req.file_id, fh->file_id, SMB2_FD_SIZE);
                 pdu = smb2_cmd_write_async(smb2, &req, 0, read_write_cb, io);
@@ -2480,8 +2481,8 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
         }
 }
 
-static int
-start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command command,
+int
+smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_command command,
               void *buf, uint32_t count, const uint64_t *position,
               smb2_command_cb cb, void *cb_data)
 {
@@ -2578,7 +2579,7 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                  uint8_t *buf, uint32_t count, uint64_t offset,
                  smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_READ, buf, count, &offset, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_READ, buf, count, &offset, cb, cb_data);
 }
 
 int
@@ -2586,35 +2587,35 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                   const uint8_t *buf, uint32_t count, uint64_t offset,
                   smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, &offset, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, &offset, cb, cb_data);
 }
 
 int
 smb2_read_async(struct smb2_context *smb2, struct smb2fh *fh,
                 uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_READ, buf, count, NULL, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_READ, buf, count, NULL, cb, cb_data);
 }
 
 int
 smb2_write_async(struct smb2_context *smb2, struct smb2fh *fh,
                  const uint8_t *buf, uint32_t count, smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, NULL, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_WRITE, discard_const(buf), count, NULL, cb, cb_data);
 }
 
 int
 smb2_fsync_async(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_FLUSH, NULL, 0, NULL, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_FLUSH, NULL, 0, NULL, cb, cb_data);
 }
 
 int
 smb2_close_async(struct smb2_context *smb2, struct smb2fh *fh,
                  smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_CLOSE, NULL, 0, NULL, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_CLOSE, NULL, 0, NULL, cb, cb_data);
 }
 
 int64_t
@@ -3728,7 +3729,7 @@ int
 smb2_ftruncate_async(struct smb2_context *smb2, struct smb2fh *fh,
                      uint64_t length, smb2_command_cb cb, void *cb_data)
 {
-        return start_file_io(smb2, fh, SMB2_SET_INFO, &length, 0, NULL, cb, cb_data);
+        return smb2_start_file_io(smb2, fh, SMB2_SET_INFO, &length, 0, NULL, cb, cb_data);
 }
 
 struct symlink_cb_data {
