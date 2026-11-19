@@ -225,6 +225,7 @@ smb2_close_context(struct smb2_context *smb2)
 
         smb2->message_id = 0;
         smb2->session_id = 0;
+        smb2->frame_deadline = 0;
         smb2->enc_keys_ready = 0;
         smb2->tree_id_top = 0;
         smb2->tree_id_cur = 0;

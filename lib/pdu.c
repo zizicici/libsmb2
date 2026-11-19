@@ -1335,21 +1335,52 @@ smb2_process_payload_variable(struct smb2_context *smb2, struct smb2_pdu *pdu)
         }
 }
 
+/* Until a header is readable (or a transform decrypted), a partial reply
+ * cannot be associated with one request. Give the frame its own deadline.
+ * If timeouts were disabled after queueing, preserve the pending requests'
+ * budgets, including the grace interval for a cancelled CREATE. */
+static time_t
+unmatched_frame_deadline(struct smb2_context *smb2, time_t now)
+{
+        struct smb2_pdu *pdu;
+        time_t deadline = 0;
+
+        if (smb2->timeout) {
+                return now + smb2->timeout;
+        }
+        for (pdu = smb2->waitqueue; pdu; pdu = pdu->next) {
+                time_t end = pdu->timeout;
+                if (pdu->cleanup_timeout && smb2_waiting_for_create_cleanup(pdu)) {
+                        end = now + pdu->cleanup_timeout;
+                }
+                if (end > deadline) {
+                        deadline = end;
+                }
+        }
+        return deadline;
+}
+
 int smb2_timeout_pdus(struct smb2_context *smb2)
 {
         struct smb2_pdu *pdu;
         struct smb2_pdu *receiving = smb2_is_server(smb2) ? NULL : smb2->pdu;
         time_t t;
         int servicing = smb2->servicing;
+        int unmatched = !smb2_is_server(smb2) && !receiving &&
+                SMB2_VALID_SOCKET(smb2->fd) && smb2->in.num_done;
 
         if (!smb2->outqueue && !smb2->waitqueue) {
                 smb2->may_have_timed_pdus = 0;
         }
         if (!smb2->may_have_timed_pdus && !smb2->io_timers &&
-            !(receiving && receiving->timeout)) {
+            !(receiving && receiving->timeout) && !smb2->frame_deadline &&
+            !(unmatched && smb2->timeout)) {
                 return 0;
         }
         t = time(NULL);
+        if (unmatched && !smb2->frame_deadline) {
+                smb2->frame_deadline = unmatched_frame_deadline(smb2, t);
+        }
         smb2->servicing = 1;
 
         /* Matching the reply header removes this request from the waitqueue.
@@ -1424,6 +1455,10 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                 } else {
                         pdu = pdu->next;
                 }
+        }
+        if (smb2->frame_deadline && smb2->frame_deadline < t) {
+                smb2_set_error(smb2, "Timed out receiving a partial SMB frame");
+                goto partial_frame;
         }
         smb2_timeout_file_io(smb2, t);
         smb2->servicing = servicing;

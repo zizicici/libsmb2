@@ -780,6 +780,40 @@ static void partial_reply_timeout(int sync_wait)
         close(pair[1]);
 }
 
+static void partial_unmatched_reply(int encrypted)
+{
+        struct smb2_context *smb2 = smb2_init_context();
+        uint8_t prefix[SMB2_SPL_SIZE + SMB2_HEADER_SIZE];
+        int pair[2], expired = 0;
+
+        assert(smb2 && !socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        assert(!fcntl(pair[0], F_SETFL, O_NONBLOCK));
+        smb2->fd = pair[0];
+        smb2->credits = 32;
+        smb2->seal = smb2->enc_keys_ready = encrypted;
+        smb2_set_timeout(smb2, 30);
+        assert(!smb2_echo_async(smb2, expect_timeout, &expired));
+        smb2_set_timeout(smb2, 0);
+        /* Fragment a library-generated transform before the encrypted body
+         * can be decoded, or stop after the header of an interim response. */
+        assert(recv(pair[1], prefix, sizeof(prefix), MSG_WAITALL) == sizeof(prefix));
+        if (!encrypted) {
+                prefix[SMB2_SPL_SIZE + 16] = SMB2_FLAGS_SERVER_TO_REDIR | SMB2_FLAGS_ASYNC_COMMAND;
+                prefix[SMB2_SPL_SIZE + 8] = SMB2_STATUS_PENDING & 0xff;
+                prefix[SMB2_SPL_SIZE + 9] = SMB2_STATUS_PENDING >> 8;
+        }
+        assert(write(pair[1], prefix, sizeof(prefix)) == sizeof(prefix));
+        assert(!smb2_service(smb2, POLLIN));
+        assert(smb2->recv_state == (encrypted ? SMB2_RECV_TRFM : SMB2_RECV_PAD));
+        assert(smb2->waitqueue && !smb2->pdu);
+        assert(smb2->frame_deadline == smb2->waitqueue->timeout);
+        smb2->waitqueue->timeout = smb2->frame_deadline = time(NULL) - 1;
+        assert(smb2_service(smb2, 0) == -ETIMEDOUT && expired == 1);
+        assert(!SMB2_VALID_SOCKET(smb2_get_fd(smb2)));
+        smb2_destroy_context(smb2);
+        close(pair[1]);
+}
+
 static void partial_cancelled_create(void)
 {
         struct smb2_context *smb2 = smb2_init_context();
@@ -889,6 +923,8 @@ int main(void)
         sync_buffers_after_failed_wait();
         sync_stat_after_failed_wait();
         partial_cancelled_create();
+        partial_unmatched_reply(0);
+        partial_unmatched_reply(1);
         partial_send_timeout();
         partial_reply_timeout(0);
         partial_reply_timeout(1);

@@ -305,6 +305,7 @@ struct smb2_context {
          */
         struct smb2_io_vectors in;
         enum smb2_recv_state recv_state;
+        time_t frame_deadline; /* partial client frame, before its MessageId is known */
         /* SPL for the (compound) command we are currently reading */
         uint32_t spl;
         /* buffer to avoid having to malloc the header */

@@ -975,6 +975,7 @@ read_more_data:
                         return -1;
                 }
 
+                smb2->frame_deadline = 0;
                 smb2->recv_state = SMB2_RECV_FIXED;
                 {
                         size_t alen = len & 0xfffe;
@@ -1121,6 +1122,7 @@ read_more_data:
                  * encrypted packet.
                  */
                 smb2->in.num_done = 0;
+                smb2->frame_deadline = 0;
                 if (smb3_decrypt_pdu(smb2)) {
                         smb2_set_error(smb2, "Failed to decrypyt pdu");
                         return -1;
@@ -1272,6 +1274,7 @@ smb2_read_from_socket(struct smb2_context *smb2)
                  * the corresponding pdu.
                  */
                 if (smb2->in.num_done == 0) {
+                        smb2->frame_deadline = 0;
                         smb2->recv_state = SMB2_RECV_SPL;
                         smb2->spl = 0;
 
