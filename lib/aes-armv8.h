@@ -25,9 +25,6 @@
 /*
  * AES-128 using the ARMv8 Cryptography Extension instructions
  * (AESE/AESMC), the arm64 counterpart of the x86 AES-NI paths.
- * The implementation compiles to no-op stubs where the extension cannot
- * be used; callers gate on smb2_armv8_available() before touching the
- * other entry points.
  */
 
 /*
@@ -41,7 +38,7 @@
  * clangs hide the wrappers behind __ARM_FEATURE_CRYPTO, so there only a
  * translation unit already built for the extension qualifies.
  */
-#if defined(__aarch64__) && (defined(__ARM_FEATURE_CRYPTO) || \
+#if !defined(HAVE_OPENSSL) && defined(__aarch64__) && (defined(__ARM_FEATURE_CRYPTO) || \
     (defined(__clang__) && __clang_major__ >= 16) || \
     (defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 9))
 #define SMB2_ARMV8_AES 1
@@ -49,12 +46,12 @@
 #define SMB2_ARMV8_AES 0
 #endif
 
-int smb2_armv8_available(void);
-
 #if SMB2_ARMV8_AES
 #include <stdint.h>
 #include <stddef.h>
 #include <arm_neon.h>
+
+int smb2_armv8_available(void);
 
 /* Eleven round keys in AESE convention. */
 struct smb2_aes128_keys {

@@ -17,14 +17,7 @@
 */
 #include "aes-armv8.h"
 
-#if !SMB2_ARMV8_AES
-
-int smb2_armv8_available(void)
-{
-        return 0;
-}
-
-#else /* SMB2_ARMV8_AES */
+#if SMB2_ARMV8_AES
 
 #include <string.h>
 
