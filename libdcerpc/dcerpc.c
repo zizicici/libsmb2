@@ -78,6 +78,25 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <smb2/smb2.h>
 #include <smb2/libsmb2.h>
 #include <smb2/libsmb2-raw.h>
+/* These additions share the SONAME of the original Linux 7.0 transport.
+ * Fall back to its queue API when running against that library. */
+extern int smb2_is_dispatching(struct smb2_context *) __attribute__((weak));
+extern int smb2_queue_pdu_checked(struct smb2_context *, struct smb2_pdu *)
+        __attribute__((weak));
+
+static int dcerpc_transport_dispatching(struct smb2_context *smb2)
+{
+        return smb2_is_dispatching && smb2_is_dispatching(smb2);
+}
+
+static int dcerpc_queue_pdu(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        if (smb2_queue_pdu_checked) {
+                return smb2_queue_pdu_checked(smb2, pdu);
+        }
+        smb2_queue_pdu(smb2, pdu);
+        return 0;
+}
 #endif
 #include <dcerpc/dcerpc.h>
 #include <dcerpc/dcerpc-dtyp.h>
@@ -199,6 +218,10 @@ p_syntax_id_t ndr64_syntax = {
 struct dcerpc_pending {
         struct dcerpc_pending *next;
         int orphaned;
+#ifdef HAVE_LIBSMB2
+        struct dcerpc_context *dce;
+        smb2_command_cb stage;
+#endif
         dcerpc_cb cb;
         void *cb_data;
 };
@@ -207,6 +230,8 @@ struct dcerpc_context {
         struct smb2_context *smb2;
         struct dcerpc_pending *pending;
         int destroying;
+        int pipe_failed;
+        unsigned active;
         /*
          * Set when dcerpc_create_context_smb() allocated/connected the
          * smb2 context. dcerpc_destroy_context() will then disconnect
@@ -270,6 +295,12 @@ dcerpc_set_error(struct dcerpc_context *dce, const char *error_string, ...)
 static int
 dcerpc_need_smb2(struct dcerpc_context *dce)
 {
+        if (dce->destroying) {
+                return -ECANCELED;
+        }
+        if (dce->pipe_failed) {
+                return -EIO;
+        }
         if (dce->smb2 == NULL) {
                 dcerpc_set_error(dce, "No smb2 context, this dcerpc context "
                                  "can only be used to encode and decode");
@@ -417,13 +448,6 @@ struct dcerpc_response_pdu {
 #define NL_FLAG_OEM_NETBIOS_DOMAIN_NAME     0x00000001
 #define NL_FLAG_OEM_NETBIOS_COMPUTER_NAME   0x00000002
 
-struct dcerpc_cb_data {
-        struct dcerpc_pending pending;
-        struct dcerpc_context *dce;
-        dcerpc_cb cb;
-        void *cb_data;
-};
-
 typedef int (*dcerpc_coder_carray)(char *name, struct dcerpc_context *dce,
                                    struct dcerpc_pdu *pdu,
                                    struct dcerpc_iovec *iov,
@@ -539,7 +563,7 @@ dcerpc_check_coders(struct smb2_context *smb2)
 }
 
 struct dcerpc_pdu {
-        struct dcerpc_pending pending;
+        struct dcerpc_pending pending; /* First so transport callbacks can recover the PDU. */
         struct dcerpc_header hdr;
 
         union {
@@ -555,8 +579,6 @@ struct dcerpc_pdu {
         auth_verifier_co_t   auth_verifier; 
 #endif
         struct dcerpc_context *dce;
-        dcerpc_cb cb;
-        void *cb_data;
 
         dcerpc_coder coder;
         int decode_size;
@@ -577,6 +599,7 @@ struct dcerpc_pdu {
         size_t frag_pos;
 
         /* Multi-fragment response reassembly (named-pipe / IOCTL) */
+        uint8_t *frag_read_buf;
         uint8_t *reasm_buf;
         size_t reasm_len;
         size_t reasm_cap;
@@ -1136,8 +1159,10 @@ dcerpc_connect_context_async(struct dcerpc_context *dce, const char *path,
                              p_syntax_id_t *syntax,
                              dcerpc_cb cb, void *cb_data)
 {
-        if (dcerpc_need_smb2(dce)) {
-                return -EINVAL;
+        int rc = dcerpc_need_smb2(dce);
+
+        if (rc) {
+                return rc;
         }
         dce->call_id = 2;
         dce->path = strdup(path);
@@ -1170,6 +1195,7 @@ static void
 dcerpc_track(struct dcerpc_context *dce, struct dcerpc_pending *p,
              dcerpc_cb cb, void *cb_data)
 {
+        p->dce = dce;
         p->orphaned = 0;
         p->cb = cb;
         p->cb_data = cb_data;
@@ -1208,36 +1234,15 @@ dcerpc_connect_context_async(struct dcerpc_context *dce,
 }
 #endif /* HAVE_LIBSMB2 */
 
-void
-dcerpc_destroy_context(struct dcerpc_context *dce)
+static void
+dcerpc_free_context(struct dcerpc_context *dce)
 {
 #ifdef HAVE_LIBSMB2
         struct smb2_context *smb2;
         int owns_smb2;
         int i;
         int opened = 0;
-#endif
-        struct dcerpc_pending *p;
 
-        if (dce == NULL || dce->destroying) {
-                return;
-        }
-        dce->destroying = 1;
-
-        /*
-         * Cancel requests still in flight. Their SMB2 callbacks will run
-         * later (reply, or smb2_destroy_context()) and must not touch dce.
-         */
-        while ((p = dce->pending) != NULL) {
-                dce->pending = p->next;
-                p->next = NULL;
-                p->orphaned = 1;
-                if (p->cb) {
-                        p->cb(dce, -ECANCELED, NULL, p->cb_data);
-                }
-        }
-
-#ifdef HAVE_LIBSMB2
         for (i = 0; i < SMB2_FD_SIZE; i++) {
                 if (dce->file_id[i]) {
                         opened = 1;
@@ -1261,18 +1266,104 @@ dcerpc_destroy_context(struct dcerpc_context *dce)
         owns_smb2 = dce->owns_smb2;
 #endif
 
+
+#ifdef HAVE_LIBSMB2
+        if (owns_smb2 && smb2) {
+                if (!dcerpc_transport_dispatching(smb2)) {
+                        smb2_disconnect_share(smb2);
+                }
+                smb2_destroy_context(smb2);
+        }
+#endif
         free(discard_const(dce->path));
         free(dce->auth_domain);
         free(dce->auth_computer);
         free(dce);
+}
+
+/* Late SMB replies still own the pending records. Their stage callbacks
+ * release those records without decoding or calling the application again. */
+static void
+dcerpc_cancel_pending(struct dcerpc_context *dce, int status)
+{
+        struct dcerpc_pending *p;
+
+        while ((p = dce->pending) != NULL) {
+                dce->pending = p->next;
+                p->next = NULL;
+                p->orphaned = 1;
+                if (p->cb) {
+                        p->cb(dce, status, NULL, p->cb_data);
+                }
+        }
+}
+
+void
+dcerpc_destroy_context(struct dcerpc_context *dce)
+{
+        if (dce == NULL || dce->destroying) {
+                return;
+        }
+        dce->destroying = 1;
+        dce->active++;
+        dcerpc_cancel_pending(dce, -ECANCELED);
+
+        if (!--dce->active) {
+                dcerpc_free_context(dce);
+        }
+}
 
 #ifdef HAVE_LIBSMB2
-        if (owns_smb2 && smb2) {
-                smb2_disconnect_share(smb2);
-                smb2_destroy_context(smb2);
+static void
+dcerpc_leave(struct dcerpc_context *dce)
+{
+        if (!--dce->active && dce->destroying) {
+                dcerpc_free_context(dce);
         }
-#endif
 }
+
+/* An incomplete exchange can leave unread pipe data and advance only one
+ * side of the Schannel sequence. A fresh association is required. */
+static void
+dcerpc_fail_pipe(struct dcerpc_context *dce, int status, const char *reason)
+{
+        dce->active++;
+        dce->pipe_failed = 1;
+        if (reason) {
+                dcerpc_set_error(dce, "%s. Open a new RPC association", reason);
+        }
+        dcerpc_cancel_pending(dce, status);
+        dcerpc_leave(dce);
+}
+
+/* A decoder or diagnostic can call application code before we have finished
+ * processing the SMB response. Keep the context alive until that frame exits.
+ * Already cancelled requests only use their stage-specific cleanup. */
+static void
+dcerpc_dispatch(struct smb2_context *smb2, int status, void *reply, void *private_data)
+{
+        struct dcerpc_pending *p = private_data;
+        struct dcerpc_context *dce = p->orphaned ? NULL : p->dce;
+
+        if (status == SMB2_STATUS_PENDING) {
+                return;
+        }
+        if (dce) {
+                dce->active++;
+        }
+        p->stage(smb2, status, reply, p);
+        if (dce) {
+                dcerpc_leave(dce);
+        }
+}
+
+static struct dcerpc_pending *
+dcerpc_stage(struct dcerpc_pending *p, smb2_command_cb stage)
+{
+        p->stage = stage;
+        return p;
+}
+#endif
 
 int
 dcerpc_set_schannel(struct dcerpc_context *dce,
@@ -1385,6 +1476,7 @@ dcerpc_free_pdu(struct dcerpc_context *dce _U_, struct dcerpc_pdu *pdu)
 
         dcerpc_mem_free(pdu->payload);
         free(pdu->frag_buf);
+        free(pdu->frag_read_buf);
         free(pdu->reasm_buf);
         free(pdu->ptrs);
         free(pdu);
@@ -2776,11 +2868,6 @@ dcerpc_reasm_append(struct dcerpc_pdu *pdu, const uint8_t *data, size_t len)
         return 0;
 }
 
-struct dcerpc_frag_read {
-        struct dcerpc_pdu *pdu;
-        uint8_t *buf;
-};
-
 static void dcerpc_send_pdu_cb_and_free(struct dcerpc_context *dce,
                                         struct dcerpc_pdu *pdu,
                                         int status, void *command_data);
@@ -2788,19 +2875,36 @@ static void dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
                                           struct dcerpc_pdu *pdu);
 static int dcerpc_read_more_frags(struct dcerpc_context *dce,
                                   struct dcerpc_pdu *pdu);
+
+/* A failed pipe operation cannot complete an RPC successfully, even when
+ * its SMB status (such as EOF) has no corresponding errno. */
+static int
+dcerpc_transport_error(int status)
+{
+        int err = nterror_to_errno(status);
+        return err ? -err : -EIO;
+}
+
 static void
-dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
+dcerpc_abort_exchange(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
+                      int status, const char *reason)
+{
+        if (!pdu->pending.orphaned) {
+                dcerpc_fail_pipe(dce, status, reason);
+        }
+        dcerpc_free_pdu(NULL, pdu);
+}
+
+static void
+dcerpc_frag_read_cb(struct smb2_context *smb2 _U_, int status,
                     void *command_data, void *private_data)
 {
-        struct dcerpc_frag_read *fr = private_data;
-        struct dcerpc_pdu *pdu = fr->pdu;
+        struct dcerpc_pdu *pdu = private_data;
         struct dcerpc_context *dce = pdu->dce;
         struct smb2_read_reply *rep = command_data;
         uint32_t nread = 0;
 
         if (pdu->pending.orphaned) {
-                free(fr->buf);
-                free(fr);
                 dcerpc_free_pdu(NULL, pdu);
                 return;
         }
@@ -2810,47 +2914,27 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
                 status = SMB2_STATUS_SUCCESS;
         }
         if (status != SMB2_STATUS_SUCCESS) {
-                smb2_set_error(smb2, "DCERPC fragment READ failed "
-                               "(0x%08x) %s", status, nterror_to_str(status));
-                free(fr->buf);
-                free(fr);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status),
-                                           NULL);
+                dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                      nterror_to_str(status));
                 return;
         }
 
         if (rep) {
                 nread = rep->data_length;
         }
-        /* fr->buf holds no more than was asked for */
         if (nread > DCE_FRAG_READ_SIZE) {
-                smb2_set_error(smb2, "DCERPC fragment READ returned %u "
-                               "bytes, more than the %d asked for", nread,
-                               DCE_FRAG_READ_SIZE);
-                free(fr->buf);
-                free(fr);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EIO, "DCERPC fragment READ exceeded the buffer");
                 return;
         }
         if (nread == 0) {
-                smb2_set_error(smb2, "DCERPC fragment READ returned 0 bytes "
-                               "before LAST_FRAG");
-                free(fr->buf);
-                free(fr);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EIO, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EIO, "DCERPC fragment READ ended before LAST_FRAG");
                 return;
         }
 
-        if (dcerpc_reasm_append(pdu, fr->buf, nread)) {
-                smb2_set_error(smb2, "DCERPC failed to grow reassembly buffer");
-                free(fr->buf);
-                free(fr);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+        if (dcerpc_reasm_append(pdu, pdu->frag_read_buf, nread)) {
+                dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                 return;
         }
-
-        free(fr->buf);
-        free(fr);
 
         dcerpc_finish_call_from_reasm(dce, pdu);
 }
@@ -2858,38 +2942,25 @@ dcerpc_frag_read_cb(struct smb2_context *smb2, int status,
 static int
 dcerpc_read_more_frags(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
 {
-        struct dcerpc_frag_read *fr;
-        struct smb2_read_request req;
+        struct smb2_read_request req = {0};
         struct smb2_pdu *smb2_pdu;
 
-        fr = calloc(1, sizeof(*fr));
-        if (fr == NULL) {
-                return -ENOMEM;
+        if (pdu->frag_read_buf == NULL) {
+                pdu->frag_read_buf = malloc(DCE_FRAG_READ_SIZE);
+                if (pdu->frag_read_buf == NULL) {
+                        return -ENOMEM;
+                }
         }
-        fr->pdu = pdu;
-        fr->buf = malloc(DCE_FRAG_READ_SIZE);
-        if (fr->buf == NULL) {
-                free(fr);
-                return -ENOMEM;
-        }
-
-        memset(&req, 0, sizeof(req));
         req.length = DCE_FRAG_READ_SIZE;
-        req.offset = 0;
-        req.buf = fr->buf;
+        req.buf = pdu->frag_read_buf;
         memcpy(req.file_id, dce->file_id, SMB2_FD_SIZE);
-        req.minimum_count = 0;
-        req.channel = SMB2_CHANNEL_NONE;
 
-        smb2_pdu = smb2_cmd_read_async(dce->smb2, &req, dcerpc_frag_read_cb,
-                                       fr);
+        smb2_pdu = smb2_cmd_read_async(dce->smb2, &req, dcerpc_dispatch,
+                        dcerpc_stage(&pdu->pending, dcerpc_frag_read_cb));
         if (smb2_pdu == NULL) {
-                free(fr->buf);
-                free(fr);
                 return -ENOMEM;
         }
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
-        return 0;
+        return dcerpc_queue_pdu(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -2906,13 +2977,14 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
 
         st = dce_frags_status(dce, pdu, pdu->reasm_buf, pdu->reasm_len);
         if (st == DCE_FRAG_NEED_MORE) {
-                if (dcerpc_read_more_frags(dce, pdu)) {
-                        dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                int rc = dcerpc_read_more_frags(dce, pdu);
+                if (rc < 0) {
+                        dcerpc_abort_exchange(dce, pdu, rc, "Could not read the rest of the RPC response");
                 }
                 return;
         }
         if (st == DCE_FRAG_ERROR) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EINVAL, NULL);
                 return;
         }
 
@@ -2923,7 +2995,7 @@ dcerpc_finish_call_from_reasm(struct dcerpc_context *dce,
 
         if ((dce->sch != NULL ? dce_unfragment_auth(dce, pdu, &iov) :
              dce_unfragment_iov(dce, pdu, &iov))) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -EINVAL, NULL);
+                dcerpc_abort_exchange(dce, pdu, -EINVAL, NULL);
                 return;
         }
 
@@ -2964,11 +3036,15 @@ static void
 dcerpc_send_pdu_cb_and_free(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
                             int status, void *command_data)
 {
-        dcerpc_cb pdu_cb = pdu->cb;
-        void *pdu_cb_data = pdu->cb_data;
+        dcerpc_cb pdu_cb = pdu->pending.cb;
+        void *pdu_cb_data = pdu->pending.cb_data;
 
-        dcerpc_untrack(dce, &pdu->pending);
-        pdu_cb(dce, status, command_data, pdu_cb_data);
+        if (pdu->pending.orphaned) {
+                dcerpc_free_data(NULL, command_data);
+        } else {
+                dcerpc_untrack(dce, &pdu->pending);
+                pdu_cb(dce, status, command_data, pdu_cb_data);
+        }
         dcerpc_free_pdu(dce, pdu);
 }
 
@@ -3020,7 +3096,12 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         }
         if (status != SMB2_STATUS_SUCCESS) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
+                if (pdu->frag_pos || dce->sch || status == SMB2_STATUS_IO_TIMEOUT) {
+                        dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                              nterror_to_str(status));
+                } else {
+                        dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
+                }
                 return;
         }
 
@@ -3030,7 +3111,7 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         pdu->payload = dcerpc_mem_init(pdu->decode_size);
         if (pdu->payload == NULL) {
                 smb2_free_data(dce->smb2, rep->output);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                 return;
         }
 
@@ -3043,7 +3124,7 @@ dcerpc_call_cb(struct smb2_context *smb2, int status,
         if (rep->output_count && rep->output) {
                 if (dcerpc_reasm_append(pdu, rep->output, rep->output_count)) {
                         smb2_free_data(dce->smb2, rep->output);
-                        dcerpc_send_pdu_cb_and_free(dce, pdu, -ENOMEM, NULL);
+                        dcerpc_abort_exchange(dce, pdu, -ENOMEM, "Could not store the RPC response");
                         return;
                 }
         }
@@ -3270,9 +3351,9 @@ dcerpc_fragment_request_auth(struct dcerpc_context *dce,
                         return -1;
                 }
                 o += flen;
+                pdu->frag_len = o;
                 off += chunk;
         } while (off < stub_len);
-        pdu->frag_len = o;
         pdu->frag_pos = 0;
         return 0;
 }
@@ -3280,12 +3361,25 @@ dcerpc_fragment_request_auth(struct dcerpc_context *dce,
 static int dcerpc_send_request_frag(struct dcerpc_context *dce,
                                     struct dcerpc_pdu *pdu);
 
+static uint16_t
+dcerpc_request_frag_length(struct dcerpc_pdu *pdu)
+{
+        const uint8_t *frag = pdu->frag_buf + pdu->frag_pos;
+
+        if (pdu->hdr.packed_drep[0] & DCERPC_DR_LITTLE_ENDIAN) {
+                return frag[8] | (frag[9] << 8);
+        }
+        return (frag[8] << 8) | frag[9];
+}
+
 static void
 dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
-                     void *command_data _U_, void *private_data)
+                     void *command_data, void *private_data)
 {
         struct dcerpc_pdu *pdu = private_data;
         struct dcerpc_context *dce = pdu->dce;
+        struct smb2_write_reply *rep = command_data;
+        uint16_t length;
         int rc;
 
         if (pdu->pending.orphaned) {
@@ -3293,15 +3387,19 @@ dcerpc_frag_write_cb(struct smb2_context *smb2 _U_, int status,
                 return;
         }
         if (status != SMB2_STATUS_SUCCESS) {
-                dcerpc_set_error(dce, "DCERPC fragment WRITE failed "
-                                 "(0x%08x) %s", status, nterror_to_str(status));
-                dcerpc_send_pdu_cb_and_free(dce, pdu,
-                                            -nterror_to_errno(status), NULL);
+                dcerpc_abort_exchange(dce, pdu, dcerpc_transport_error(status),
+                                      nterror_to_str(status));
                 return;
         }
+        length = dcerpc_request_frag_length(pdu);
+        if (!rep || rep->count != length) {
+                dcerpc_abort_exchange(dce, pdu, -EIO, "Incomplete DCERPC fragment WRITE");
+                return;
+        }
+        pdu->frag_pos += length;
         rc = dcerpc_send_request_frag(dce, pdu);
         if (rc) {
-                dcerpc_send_pdu_cb_and_free(dce, pdu, rc, NULL);
+                dcerpc_abort_exchange(dce, pdu, rc, "Could not submit the next RPC fragment");
         }
 }
 
@@ -3313,13 +3411,8 @@ static int
 dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
 {
         uint8_t *frag = pdu->frag_buf + pdu->frag_pos;
-        uint16_t flen = frag[8] | (frag[9] << 8);
+        uint16_t flen = dcerpc_request_frag_length(pdu);
         struct smb2_pdu *smb2_pdu;
-
-        if (!(pdu->hdr.packed_drep[0] & DCERPC_DR_LITTLE_ENDIAN)) {
-                flen = (frag[8] << 8) | frag[9];
-        }
-        pdu->frag_pos += flen;
 
         if (frag[3] & PFC_LAST_FRAG) {
                 struct smb2_ioctl_request req;
@@ -3331,7 +3424,7 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 req.input = frag;
                 req.flags = SMB2_0_IOCTL_IS_FSCTL;
                 smb2_pdu = smb2_cmd_ioctl_async(dce->smb2, &req,
-                                                dcerpc_call_cb, pdu);
+                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_call_cb));
         } else {
                 struct smb2_write_request req;
 
@@ -3340,13 +3433,12 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
                 req.length = flen;
                 req.buf = frag;
                 smb2_pdu = smb2_cmd_write_async(dce->smb2, &req, 0,
-                                                dcerpc_frag_write_cb, pdu);
+                                dcerpc_dispatch, dcerpc_stage(&pdu->pending, dcerpc_frag_write_cb));
         }
         if (smb2_pdu == NULL) {
                 return -ENOMEM;
         }
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
-        return 0;
+        return dcerpc_queue_pdu(dce->smb2, smb2_pdu);
 }
 
 /*
@@ -3368,8 +3460,8 @@ dcerpc_send_request_frag(struct dcerpc_context *dce, struct dcerpc_pdu *pdu)
  * On error, command_data is NULL; there is nothing to free for the reply.
  * Request-side buffers supplied by the caller are never part of this tree.
  */
-int
-dcerpc_call_async(struct dcerpc_context *dce,
+static int
+dcerpc_submit_call(struct dcerpc_context *dce,
                   int opnum,
                   dcerpc_coder req_coder, void *req,
                   dcerpc_coder rep_coder, int decode_size,
@@ -3378,24 +3470,23 @@ dcerpc_call_async(struct dcerpc_context *dce,
         struct dcerpc_pdu *pdu = NULL;
         struct dcerpc_iovec iov = {0};
         size_t max_frag, len;
-
-        if (dce->destroying) {
-                return -ECANCELED;
-        }
-        if (dcerpc_need_smb2(dce)) {
-                return -EINVAL;
-        }
+        int rc;
 
         pdu = dcerpc_encode_request(dce, opnum, req_coder, req, &iov);
         if (pdu == NULL) {
                 return -1;
         }
+        /* An application coder can destroy the context or retire the pipe. */
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                dcerpc_free_iovec(&iov);
+                dcerpc_free_pdu(dce, pdu);
+                return rc;
+        }
         len = iov.offset;
 
         pdu->coder = rep_coder;
         pdu->decode_size = decode_size;
-        pdu->cb = cb;
-        pdu->cb_data = cb_data;
 
         max_frag = dce->max_xmit_frag ? dce->max_xmit_frag
                                       : DCE_DEFAULT_XMIT_FRAG;
@@ -3405,6 +3496,9 @@ dcerpc_call_async(struct dcerpc_context *dce,
         if (dce->sch != NULL) {
                 if (dcerpc_fragment_request_auth(dce, pdu, iov.buf, len,
                                                  max_frag)) {
+                        if (pdu->frag_len) {
+                                dcerpc_fail_pipe(dce, -EIO, "Could not finish signing the RPC fragments");
+                        }
                         dcerpc_free_iovec(&iov);
                         dcerpc_free_pdu(dce, pdu);
                         return -1;
@@ -3429,12 +3523,44 @@ dcerpc_call_async(struct dcerpc_context *dce,
         }
         dcerpc_free_iovec(&iov);
 
-        if (dcerpc_send_request_frag(dce, pdu)) {
-                dcerpc_free_pdu(dce, pdu);
-                return -ENOMEM;
-        }
+        /* Track before sending: queueing can fail the fragment
+         * synchronously (e.g. sealing with no keys), and that path runs
+         * the callback, which untracks and frees the pdu before
+         * dcerpc_send_request_frag() returns. Tracking afterwards would
+         * write the freed pdu back onto dce->pending. */
         dcerpc_track(dce, &pdu->pending, cb, cb_data);
+        rc = dcerpc_send_request_frag(dce, pdu);
+        if (rc) {
+                if (pdu->pending.orphaned) {
+                        rc = 0; /* destruction already delivered cancellation */
+                }
+                dcerpc_untrack(dce, &pdu->pending);
+                /* Signing already consumed sequence numbers, but the peer
+                 * did not receive the rejected request. */
+                if (rc && dce->sch) {
+                        dcerpc_fail_pipe(dce, -EIO, "Could not submit the signed RPC request");
+                }
+                dcerpc_free_pdu(dce, pdu);
+                return rc;
+        }
         return 0;
+}
+
+int
+dcerpc_call_async(struct dcerpc_context *dce, int opnum,
+                  dcerpc_coder req_coder, void *req, dcerpc_coder rep_coder,
+                  int decode_size, dcerpc_cb cb, void *cb_data)
+{
+        int rc;
+
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                return rc;
+        }
+        dce->active++;
+        rc = dcerpc_submit_call(dce, opnum, req_coder, req, rep_coder, decode_size, cb, cb_data);
+        dcerpc_leave(dce);
+        return rc;
 }
 
 /*
@@ -3442,87 +3568,67 @@ dcerpc_call_async(struct dcerpc_context *dce,
  */
 struct dcerpc_sync_cb_data {
         int is_finished;
-        /*
-         * The sync caller gave up waiting (dcerpc_wait_for_reply()
-         * failed) while the call was still pending: the callback frees
-         * this and the reply, if it ever comes.
-         */
-        int abandoned;
         int status;
         void *ptr;
 };
 
-static int
-dcerpc_wait_for_reply(struct smb2_context *smb2, struct dcerpc_sync_cb_data *cb_data)
-{
-        while (!cb_data->is_finished) {
-                struct pollfd pfd;
-
-                memset(&pfd, 0, sizeof(pfd));
-                pfd.fd = smb2_get_fd(smb2);
-                pfd.events = smb2_which_events(smb2);
-
-                if (poll(&pfd, 1, 1000) < 0) {
-                        smb2_set_error(smb2, "Poll failed");
-                        return -1;
-                }
-                /*
-                 * Service even when idle: libsmb2 only times out PDUs
-                 * from smb2_service(), so a server that never answers
-                 * would otherwise keep us here for ever.
-                 */
-                if (smb2_service(smb2, pfd.revents) < 0) {
-                        /*
-                         * Our reply was processed before the error, as
-                         * lib/sync.c: the call completed, so return it.
-                         */
-                        if (cb_data->is_finished) {
-                                break;
-                        }
-                        smb2_set_error(smb2, "smb2_service failed with : "
-                                       "%s\n", smb2_get_error(smb2));
-                        return -1;
-                }
-        }
-        return 0;
-}
-
 static void
-dcerpc_call_sync_cb(struct dcerpc_context *dce, int status,
+dcerpc_call_sync_cb(struct dcerpc_context *dce _U_, int status,
                     void *command_data, void *cb_data)
 {
         struct dcerpc_sync_cb_data *scb = cb_data;
 
-        if (scb->abandoned) {
-                if (command_data != NULL) {
-                        dcerpc_free_data(dce, command_data);
-                }
-                free(scb);
-                return;
-        }
         scb->status = status;
         scb->ptr = command_data;
         scb->is_finished = 1;
 }
 
-/*
- * dcerpc_wait_for_reply() failed. If the call already completed, free
- * what it left; else it is still pending and its callback will run later
- * (when the reply, a timeout or dcerpc_destroy_context() comes), so leave
- * scb for dcerpc_call_sync_cb() to free then.
- */
-static void
-dcerpc_abandon_sync(struct dcerpc_context *dce,
-                    struct dcerpc_sync_cb_data *scb)
+static int
+dcerpc_sync_in_dispatch(struct smb2_context *smb2 _U_)
 {
-        if (scb->is_finished) {
-                if (scb->ptr != NULL) {
-                        dcerpc_free_data(dce, scb->ptr);
-                }
-                free(scb);
-                return;
+        if (dcerpc_transport_dispatching(smb2)) {
+                errno = EDEADLK;
+                return 1;
         }
-        scb->abandoned = 1;
+        return 0;
+}
+
+static int
+dcerpc_wait_for_reply(struct dcerpc_context *dce, struct smb2_context *smb2,
+                      struct dcerpc_sync_cb_data *scb)
+{
+        int rc = 0;
+
+        while (!scb->is_finished) {
+                struct pollfd pfd = {0};
+
+                pfd.fd = smb2_get_fd(smb2);
+                pfd.events = smb2_which_events(smb2);
+                if (poll(&pfd, 1, 1000) < 0) {
+                        if (errno != EINTR) {
+                                rc = -errno;
+                                smb2_set_error(smb2, "Poll failed: %s", strerror(-rc));
+                                break;
+                        }
+                        pfd.revents = 0;
+                }
+                /* Service on idle ticks and after signals to run SMB timeouts. */
+                rc = smb2_service(smb2, pfd.revents);
+                if (rc < 0) {
+                        /* The transport uses -1 for generic socket errors. */
+                        if (rc == -1) {
+                                rc = -EIO;
+                        }
+                        break;
+                }
+        }
+        if (scb->is_finished) {
+                return scb->status;
+        }
+
+        /* Keep the diagnostic set by poll or the transport. */
+        dcerpc_fail_pipe(dce, rc, NULL);
+        return rc;
 }
 
 void *
@@ -3532,8 +3638,7 @@ dcerpc_call(struct dcerpc_context *dce,
             dcerpc_coder rep_coder, int decode_size)
 {
         struct smb2_context *smb2;
-        struct dcerpc_sync_cb_data *scb;
-        void *rep = NULL;
+        struct dcerpc_sync_cb_data scb = {0};
         int rc;
 
         if (dce == NULL) {
@@ -3545,36 +3650,18 @@ dcerpc_call(struct dcerpc_context *dce,
                 return NULL;
         }
 
-        scb = calloc(1, sizeof(*scb));
-        if (scb == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
+        if (dcerpc_sync_in_dispatch(smb2)) {
                 return NULL;
         }
-
         rc = dcerpc_call_async(dce, opnum, req_coder, req, rep_coder,
-                               decode_size, dcerpc_call_sync_cb, scb);
+                               decode_size, dcerpc_call_sync_cb, &scb);
         if (rc != 0) {
-                free(scb);
                 return NULL;
         }
-
-        if (dcerpc_wait_for_reply(smb2, scb) < 0) {
-                dcerpc_abandon_sync(dce, scb);
+        if (dcerpc_wait_for_reply(dce, smb2, &scb) != 0) {
                 return NULL;
         }
-
-        if (scb->status != (int)SMB2_STATUS_SUCCESS) {
-                /* Reply root may still be present on some error paths. */
-                if (scb->ptr != NULL) {
-                        dcerpc_free_data(dce, scb->ptr);
-                }
-                free(scb);
-                return NULL;
-        }
-
-        rep = scb->ptr;
-        free(scb);
-        return rep;
+        return scb.ptr;
 }
 
 /*
@@ -3589,7 +3676,7 @@ dcerpc_connect_context(struct dcerpc_context *dce, const char *path,
                        p_syntax_id_t *syntax)
 {
         struct smb2_context *smb2;
-        struct dcerpc_sync_cb_data *scb;
+        struct dcerpc_sync_cb_data scb = {0};
         int rc;
 
         if (dce == NULL) {
@@ -3600,48 +3687,15 @@ dcerpc_connect_context(struct dcerpc_context *dce, const char *path,
                 return dcerpc_need_smb2(dce);
         }
 
-        scb = calloc(1, sizeof(*scb));
-        if (scb == NULL) {
-                smb2_set_error(smb2, "Failed to allocate sync_cb_data");
-                return -ENOMEM;
+        if (dcerpc_sync_in_dispatch(smb2)) {
+                return -EDEADLK;
         }
-
         rc = dcerpc_connect_context_async(dce, path, syntax,
-                                          dcerpc_call_sync_cb, scb);
+                                          dcerpc_call_sync_cb, &scb);
         if (rc != 0) {
-                free(scb);
                 return rc;
         }
-
-        if (dcerpc_wait_for_reply(smb2, scb) < 0) {
-                dcerpc_abandon_sync(dce, scb);
-                return -1;
-        }
-
-        rc = scb->status;
-        free(scb);
-
-        if (rc != (int)SMB2_STATUS_SUCCESS) {
-                return rc ? rc : -1;
-        }
-
-        return 0;
-}
-
-static void
-dcerpc_bind_cb(struct dcerpc_context *dce, int status,
-               void *command_data, void *cb_data)
-{
-        struct dcerpc_cb_data *data = cb_data;
-
-        if (status != SMB2_STATUS_SUCCESS) {
-                data->cb(dce, status, NULL, data->cb_data);
-                free(data);
-                return;
-        }
-
-        data->cb(dce, 0, NULL, data->cb_data);
-        free(data);
+        return dcerpc_wait_for_reply(dce, smb2, &scb);
 }
 
 static int dcerpc_bind_ack_auth(struct dcerpc_context *dce,
@@ -3671,7 +3725,7 @@ smb2_bind_cb(struct smb2_context *smb2, int status,
 
         if (status != SMB2_STATUS_SUCCESS) {
                 dcerpc_free_ioctl_output(smb2, status, rep);
-                dcerpc_send_pdu_cb_and_free(dce, pdu, -nterror_to_errno(status), NULL);
+                dcerpc_send_pdu_cb_and_free(dce, pdu, dcerpc_transport_error(status), NULL);
                 return;
         }
 
@@ -3913,8 +3967,7 @@ dcerpc_bind_ack_auth(struct dcerpc_context *dce, struct dcerpc_pdu *pdu,
 
 
 static int
-dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
-                  void *cb_data)
+dcerpc_bind_async(struct dcerpc_context *dce, struct dcerpc_pending *open)
 {
         struct dcerpc_pdu *pdu;
         struct smb2_pdu *smb2_pdu;
@@ -3981,8 +4034,6 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 pce->transfer_syntaxes[0] = &ndr64_syntax;
         }
 
-        pdu->cb = cb;
-        pdu->cb_data = cb_data;
 
         iov = (struct dcerpc_iovec){
                 .buf = pdu->payload,
@@ -4008,13 +4059,20 @@ dcerpc_bind_async(struct dcerpc_context *dce, dcerpc_cb cb,
                 dcerpc_free_pdu(dce, pdu);
                 return -ECANCELED;
         }
-        smb2_pdu = smb2_cmd_ioctl_async(dce->smb2, &req, smb2_bind_cb, pdu);
+        smb2_pdu = smb2_cmd_ioctl_async(dce->smb2, &req, dcerpc_dispatch,
+                        dcerpc_stage(&pdu->pending, smb2_bind_cb));
         if (smb2_pdu == NULL) {
                 dcerpc_free_pdu(dce, pdu);
                 return -ENOMEM;
         }
-        dcerpc_track(dce, &pdu->pending, cb, cb_data);
-        smb2_queue_pdu(dce->smb2, smb2_pdu);
+        dcerpc_untrack(dce, open);
+        dcerpc_track(dce, &pdu->pending, open->cb, open->cb_data);
+        if (dcerpc_queue_pdu(dce->smb2, smb2_pdu) < 0) {
+                int rc = pdu->pending.orphaned ? 0 : -EIO;
+                dcerpc_untrack(dce, &pdu->pending);
+                dcerpc_free_pdu(dce, pdu);
+                return rc;
+        }
  
         return 0;
 }
@@ -4023,11 +4081,11 @@ static void
 smb2_open_cb(struct smb2_context *smb2, int status,
              void *command_data, void *private_data)
 {
-        struct dcerpc_cb_data *data = private_data;
+        struct dcerpc_pending *data = private_data;
         struct smb2_create_reply *rep = command_data;
         struct dcerpc_context *dce = data->dce;
 
-        if (data->pending.orphaned) {
+        if (data->orphaned) {
                 /* context destroyed while opening: close the pipe again */
                 if (status == SMB2_STATUS_SUCCESS) {
                         struct smb2_close_request cl_req;
@@ -4044,46 +4102,35 @@ smb2_open_cb(struct smb2_context *smb2, int status,
                 free(data);
                 return;
         }
-        dcerpc_untrack(dce, &data->pending);
-
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_error(smb2, "Failed to open pipe %s: %s",
                                dce->path, nterror_to_str(status));
-                data->cb(dce, -nterror_to_errno(status),
-                         NULL, data->cb_data);
-                free(data);
-                return;
+                status = dcerpc_transport_error(status);
+        } else {
+                memcpy(dce->file_id, rep->file_id, SMB2_FD_SIZE);
+                status = dcerpc_bind_async(dce, data);
         }
-        
-        memcpy(dce->file_id, rep->file_id, SMB2_FD_SIZE);
-
-        status = dcerpc_bind_async(dce, dcerpc_bind_cb, data);
-        if (status) {
+        if (status && !data->orphaned) {
+                dcerpc_untrack(dce, data);
                 data->cb(dce, status, NULL, data->cb_data);
-                free(data);
-                return;
         }
-
-        return;
+        free(data);
 }
 
-int
-dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb,
+static int
+dcerpc_submit_open(struct dcerpc_context *dce, dcerpc_cb cb,
                   void *cb_data)
 {
         struct smb2_create_request req;
         struct smb2_pdu *pdu;
-        struct dcerpc_cb_data *data;
+        struct dcerpc_pending *data;
 
-        data = calloc(1, sizeof(struct dcerpc_cb_data));
+        data = calloc(1, sizeof(struct dcerpc_pending));
         if (data == NULL) {
                 dcerpc_set_error(dce, "Failed to allocate dcerpc callback "
                                  "data");
                 return -ENOMEM;
         }
-        data->dce = dce;
-        data->cb = cb;
-        data->cb_data = cb_data;
 
         memset(&req, 0, sizeof(struct smb2_create_request));
         req.requested_oplock_level = SMB2_OPLOCK_LEVEL_NONE;
@@ -4105,19 +4152,35 @@ dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb,
         req.create_options = 0;
         req.name = dce->path;
 
-        if (dce->destroying) {
-                free(data);
-                return -ECANCELED;
-        }
-        pdu = smb2_cmd_create_async(dce->smb2, &req, smb2_open_cb, data);
+        pdu = smb2_cmd_create_async(dce->smb2, &req, dcerpc_dispatch,
+                        dcerpc_stage(data, smb2_open_cb));
         if (pdu == NULL) {
                 free(data);
                 return -ENOMEM;
         }
-        dcerpc_track(dce, &data->pending, cb, cb_data);
-        smb2_queue_pdu(dce->smb2, pdu);
-
+        dcerpc_track(dce, data, cb, cb_data);
+        if (dcerpc_queue_pdu(dce->smb2, pdu) < 0) {
+                int rc = data->orphaned ? 0 : -EIO;
+                dcerpc_untrack(dce, data);
+                free(data);
+                return rc;
+        }
         return 0;
+}
+
+int
+dcerpc_open_async(struct dcerpc_context *dce, dcerpc_cb cb, void *cb_data)
+{
+        int rc;
+
+        rc = dcerpc_need_smb2(dce);
+        if (rc) {
+                return rc;
+        }
+        dce->active++;
+        rc = dcerpc_submit_open(dce, cb, cb_data);
+        dcerpc_leave(dce);
+        return rc;
 }
 
 #else /* !HAVE_LIBSMB2 */
