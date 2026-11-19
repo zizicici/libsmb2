@@ -43,7 +43,7 @@ if(NOT ESP_PLATFORM)
 endif()
 
   # Names used by CMake for hosted Unix targets with the POSIX utilities.
-  if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin|.*BSD|DragonFly|SunOS|Solaris|Android)$")
+  if(CMAKE_SYSTEM_NAME MATCHES "^(Linux|GNU|Darwin|.*BSD|DragonFly|SunOS|Solaris|Android)$")
     set(SMB2_HOSTED_UNIX ON)
   endif()
 
@@ -295,7 +295,13 @@ endif()
       if(HAVE_GETRANDOM)
         add_definitions(-DHAVE_SYS_RANDOM_H -DHAVE_GETRANDOM)
       endif()
-      if(EXISTS "/dev/urandom")
+      # Cross builds can override the target device independently of the host.
+      if(NOT DEFINED HAVE_DEV_URANDOM)
+        if(CMAKE_CROSSCOMPILING OR EXISTS "/dev/urandom")
+          set(HAVE_DEV_URANDOM ON)
+        endif()
+      endif()
+      if(HAVE_DEV_URANDOM)
         add_definitions(-DHAVE_DEV_URANDOM)
       endif()
     endif()
