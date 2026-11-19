@@ -15,16 +15,6 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-
-#include "compat.h"
-
 #include "aes-armv8.h"
 
 #if !SMB2_ARMV8_AES
@@ -35,6 +25,10 @@ int smb2_armv8_available(void)
 }
 
 #else /* SMB2_ARMV8_AES */
+
+#include <string.h>
+
+#include "compat.h"
 
 #define SMB2_ARMV8 __attribute__((target("+crypto")))
 

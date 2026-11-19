@@ -22,9 +22,6 @@
 #include "config.h"
 #endif
 
-#include <stdint.h>
-#include <stddef.h>
-
 /*
  * AES-128 using the ARMv8 Cryptography Extension instructions
  * (AESE/AESMC), the arm64 counterpart of the x86 AES-NI paths.
@@ -52,15 +49,17 @@
 #define SMB2_ARMV8_AES 0
 #endif
 
-/* Eleven round keys in AESE convention, opaque to callers. */
-struct smb2_aes128_keys {
-        uint8_t rk[11][16];
-};
-
 int smb2_armv8_available(void);
 
 #if SMB2_ARMV8_AES
+#include <stdint.h>
+#include <stddef.h>
 #include <arm_neon.h>
+
+/* Eleven round keys in AESE convention. */
+struct smb2_aes128_keys {
+        uint8_t rk[11][16];
+};
 
 /*
  * AESE(V, K) is ShiftRows(SubBytes(V ^ K)): the round key is added
@@ -90,7 +89,6 @@ smb2_armv8_aes128_encrypt_block(const uint8_t in[16],
 {
         vst1q_u8(out, smb2_armv8_aes128_encrypt(vld1q_u8(in), keys));
 }
-#endif /* SMB2_ARMV8_AES */
 
 void smb2_armv8_aes128_expand_key(const uint8_t key[16],
                                   struct smb2_aes128_keys *keys);
@@ -106,4 +104,5 @@ int aes128ccm_armv8_decrypt(unsigned char *key,
                             unsigned char *p, size_t plen,
                             unsigned char *m, size_t mlen);
 
+#endif /* SMB2_ARMV8_AES */
 #endif /* _LIBSMB2_AES_ARMV8_H_ */
