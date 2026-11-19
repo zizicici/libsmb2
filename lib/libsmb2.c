@@ -2154,6 +2154,7 @@ struct file_io {
                 struct smb2_read_cb_data read;
                 struct smb2_write_cb_data write;
                 uint64_t truncate_length;
+                int close_timeout;
         } args;
 };
 
@@ -2193,6 +2194,22 @@ remove_io_timer(struct smb2_context *smb2, struct file_io *io)
         io->timer_prev = io->timer_next = NULL;
 }
 
+/* The caller has given up its handle. Keep the queued CLOSE so the server
+ * handle can be released after the preceding I/O drains. */
+static void
+expire_deferred_close(struct smb2_context *smb2, struct file_io *io)
+{
+        smb2_command_cb cb = io->cb;
+        void *data = io->cb_data;
+
+        io->deadline = 0;
+        io->cb = NULL;
+        io->cb_data = NULL;
+        if (cb) {
+                cb(smb2, -ETIMEDOUT, NULL, data);
+        }
+}
+
 void
 smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
 {
@@ -2208,20 +2225,18 @@ smb2_timeout_file_io(struct smb2_context *smb2, time_t now)
                         continue;
                 }
                 remove_io_timer(smb2, io);
-                if (io == fh->waiting_close) {
-                        fh->waiting_close = NULL;
-                        fh->io_head = fh->io_tail = NULL;
-                } else {
-                        for (prev = fh->io_head; prev->next != io; prev = prev->next) {
-                        }
-                        prev->next = io->next;
-                        if (fh->io_tail == io) {
-                                fh->io_tail = prev;
-                        }
-                }
                 if (io->command == SMB2_CLOSE) {
-                        fh->closing = 0;
-                } else if (io->command == SMB2_READ) {
+                        expire_deferred_close(smb2, io);
+                        io = smb2->io_timers;
+                        continue;
+                }
+                for (prev = fh->io_head; prev->next != io; prev = prev->next) {
+                }
+                prev->next = io->next;
+                if (fh->io_tail == io) {
+                        fh->io_tail = prev;
+                }
+                if (io->command == SMB2_READ) {
                         args = &io->args.read;
                 } else if (io->command == SMB2_WRITE) {
                         args = &io->args.write;
@@ -2245,14 +2260,29 @@ close_cb(struct smb2_context *smb2, int status,
          void *command_data, void *private_data)
 {
         struct file_io *io = private_data;
-        struct smb2fh *fh = io->fh;
 
         if (status != SMB2_STATUS_SUCCESS) {
                 smb2_set_nterror(smb2, status, "Close failed with (0x%08x) %s",
                                  status, nterror_to_str(status));
         }
         file_io_done(smb2, io, status ? command_error(status) : 0, NULL);
-        free_smb2fh(smb2, fh);
+}
+
+/* The caller's timeout cannot discard the only CLOSE before it goes out.
+ * Retain the encoded request for the next credit grant and release fh now. */
+int
+smb2_expire_unsent_close(struct smb2_context *smb2, struct smb2_pdu *pdu)
+{
+        struct file_io *io;
+        if (pdu->cb != close_cb) {
+                return 0;
+        }
+        io = pdu->cb_data;
+        pdu->timeout = 0;
+        pdu->cb = abandoned_close_cb;
+        pdu->cb_data = NULL;
+        file_io_done(smb2, io, -ETIMEDOUT, NULL);
+        return 1;
 }
 
 static int
@@ -2268,6 +2298,7 @@ submit_close(struct smb2_context *smb2, struct file_io *io)
                 smb2_set_error(smb2, "Failed to create close command");
                 return -ENOMEM;
         }
+        pdu->cleanup_timeout = io->args.close_timeout;
         return queue_io_pdu(smb2, pdu, io) < 0 ? -EIO : 0;
 }
 
@@ -2310,7 +2341,6 @@ positioned_io_done(struct smb2_context *smb2, struct smb2fh *fh)
         fh->waiting_close = NULL;
         rc = submit_file_io(smb2, io);
         if (rc < 0) {
-                fh->closing = 0;
                 file_io_done(smb2, io, rc, NULL);
         }
 }
@@ -2420,8 +2450,16 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         if (io->timer_prev || smb2->io_timers == io) {
                 remove_io_timer(smb2, io);
                 if (io->deadline < time(NULL)) {
-                        return -ETIMEDOUT;
+                        if (io->command != SMB2_CLOSE) {
+                                return -ETIMEDOUT;
+                        }
+                        expire_deferred_close(smb2, io);
                 }
+        }
+        if (io->command == SMB2_CLOSE && fh->pending_positioned) {
+                fh->waiting_close = io;
+                start_io_timer(smb2, io);
+                return 0;
         }
         /* A shutdown completes the accepted queue locally. Its callers may
          * already have returned from a failed synchronous transport wait. */
@@ -2437,11 +2475,6 @@ submit_file_io(struct smb2_context *smb2, struct file_io *io)
         case SMB2_FLUSH:
                 return submit_fsync(smb2, io);
         case SMB2_CLOSE:
-                if (fh->pending_positioned) {
-                        fh->waiting_close = io;
-                        start_io_timer(smb2, io);
-                        return 0;
-                }
                 return submit_close(smb2, io);
         default:
                 return -EINVAL;
@@ -2473,6 +2506,9 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                 if (io->cb) {
                         io->cb(smb2, status, reply, io->cb_data);
                 }
+                if (io->command == SMB2_CLOSE && fh->closing) {
+                        free_smb2fh(smb2, fh);
+                }
                 free(io);
                 /* With no successor, the callback may have closed the handle. */
                 if (!next) {
@@ -2489,8 +2525,6 @@ file_io_done(struct smb2_context *smb2, struct file_io *io, int status, void *re
                         reply = &io->args.read;
                 } else if (io->command == SMB2_WRITE) {
                         reply = &io->args.write;
-                } else if (io->command == SMB2_CLOSE) {
-                        fh->closing = 0;
                 }
         }
 }
@@ -2544,6 +2578,7 @@ smb2_start_file_io(struct smb2_context *smb2, struct smb2fh *fh, enum smb2_comma
         } else if (command == SMB2_SET_INFO) {
                 io->args.truncate_length = *(const uint64_t *)buf;
         } else if (command == SMB2_CLOSE) {
+                io->args.close_timeout = smb2->timeout < 0 ? 1 : smb2->timeout;
                 fh->closing = 1;
         }
         if (!position && fh->io_tail) {

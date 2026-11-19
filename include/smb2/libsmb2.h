@@ -960,6 +960,10 @@ struct smb2fh *smb2_open(struct smb2_context *smb2, const char *path, int flags)
 /*
  * Async close()
  *
+ * A return of 0 transfers ownership of fh to the library, including when
+ * the callback reports a timeout. An immediate submission error leaves fh
+ * with the caller.
+ *
  * Returns
  *  0     : The operation was initiated. Result of the operation will be
  *          reported through the callback function.

@@ -377,6 +377,13 @@ smb2_write_to_socket(struct smb2_context *smb2)
                         return -1;
                 }
 
+                if (count > 0 && !pdu->timeout && pdu->header.command == SMB2_CLOSE &&
+                    pdu->cleanup_timeout) {
+                        /* A background CLOSE waited for earlier I/O or credits.
+                         * Bound its wire exchange once the first byte is sent. */
+                        pdu->timeout = time(NULL) + pdu->cleanup_timeout;
+                        smb2->may_have_timed_pdus = 1;
+                }
                 pdu->out.num_done += (size_t)count;
 
                 if (pdu->out.num_done == SMB2_SPL_SIZE + spl) {

@@ -1370,6 +1370,10 @@ int smb2_timeout_pdus(struct smb2_context *smb2)
                                 smb2_set_error(smb2, "Timed out sending a partial SMB frame");
                                 goto partial_frame;
                         }
+                        if (smb2_expire_unsent_close(smb2, pdu)) {
+                                pdu = smb2->outqueue;
+                                continue;
+                        }
                         SMB2_LIST_REMOVE(&smb2->outqueue, pdu);
                         /*
                          * An unsent compound is still chained: like

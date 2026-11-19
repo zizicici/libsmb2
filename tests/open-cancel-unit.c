@@ -347,6 +347,28 @@ static void expect_timeout(struct smb2_context *smb2, int status, void *args, vo
         (*count)++;
 }
 
+static void close_waiting_for_credit(struct smb2_context *smb2)
+{
+        struct smb2fh *fh, *previous = smb2->fhs;
+        smb2_file_id id = {0};
+        int expired = 0;
+
+        assert(!smb2_select_tree_id(smb2, 1));
+        fh = smb2_fh_from_file_id(smb2, &id);
+        smb2->credits = 0;
+        smb2_set_timeout(smb2, 30);
+        assert(fh && !smb2_close_async(smb2, fh, expect_timeout, &expired));
+        smb2_set_timeout(smb2, 0);
+        smb2->outqueue->timeout = time(NULL) - 1;
+        assert(!smb2_service(smb2, 0) && expired == 1 && smb2->fhs == previous);
+        assert(smb2->outqueue && smb2->outqueue->timeout == 0);
+        smb2->credits = 32;
+        assert(!smb2_service(smb2, POLLOUT));
+        assert(smb2->waitqueue && smb2->waitqueue->timeout > time(NULL));
+        reply(smb2, SMB2_CLOSE, 0, NULL);
+        assert(expired == 1);
+}
+
 static void deferred_io_timeout(struct smb2_context *smb2, int positioned)
 {
         struct callbacks calls = {0};
@@ -370,10 +392,10 @@ static void deferred_io_timeout(struct smb2_context *smb2, int positioned)
         smb2_set_timeout(smb2, 0);
         assert(!smb2_service(smb2, 0));
         assert(expired == 1 && !calls.completed);
-        assert(!smb2_close_async(smb2, fh, completed, &calls));
         reply(smb2, SMB2_READ, 0, &read);
+        assert(smb2->waitqueue && smb2->waitqueue->timeout >= time(NULL));
         reply(smb2, SMB2_CLOSE, 0, NULL);
-        assert(calls.completed == 2);
+        assert(calls.completed == 1 && expired == 1);
 }
 
 static void promoted_io_timeout(struct smb2_context *smb2)
@@ -799,6 +821,7 @@ int main(void)
         reject_first_io(smb2, 1);
         nonread_eof(smb2);
         promoted_io_timeout(smb2);
+        close_waiting_for_credit(smb2);
         deferred_io_timeout(smb2, 0);
         deferred_io_timeout(smb2, 1);
         flush_after_tree_switch(smb2);
