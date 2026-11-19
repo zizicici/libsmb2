@@ -53,9 +53,10 @@ static int completed(struct completion *c, int status, uint64_t offset)
 
 static int check_io(struct smb2_context *smb2, const char *path)
 {
-        struct completion w[3] = {0}, r[3] = {0};
+        /* Cleanup in main can deliver callbacks after an early return. */
+        static struct completion w[3], r[3];
         static const uint8_t first[] = "AAAA", second[] = "BBBB", patch[] = "CC";
-        uint8_t buf[18] = {0};
+        static uint8_t buf[18];
         struct smb2fh *fh = smb2_open(smb2, path, O_RDWR | O_CREAT | O_TRUNC);
 
         if (!fh ||
