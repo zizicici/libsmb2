@@ -3645,9 +3645,6 @@ dcerpc_call(struct dcerpc_context *dce,
                 return NULL;
         }
         if (dcerpc_wait_for_reply(dce, smb2, &scb) != 0) {
-                if (scb.ptr) {
-                        dcerpc_free_data(dce, scb.ptr);
-                }
                 return NULL;
         }
         return scb.ptr;
